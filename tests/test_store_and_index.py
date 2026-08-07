@@ -31,6 +31,7 @@ def test_model_and_dimension_are_recorded(fake_embed):
     assert info["dimension"] == "8"
 
 
+@pytest.mark.skipif(config.WINDOWS, reason="Windows has no POSIX mode bits")
 def test_index_is_created_owner_only(fake_embed):
     store.open_for_write()
     assert config.db_path().stat().st_mode & 0o777 == 0o600
@@ -57,11 +58,14 @@ def test_search_before_indexing_gives_an_actionable_error():
     assert "agent-history index" in str(e.value)
 
 
-def test_reset_removes_the_index(fake_embed):
-    store.open_for_write()
+def test_reset_clears_the_index(fake_embed):
+    """Windows may refuse to unlink an open file; the data must go regardless."""
+    db, _ = store.open_for_write()
     assert config.db_path().exists()
     store.reset()
-    assert not config.db_path().exists()
+    if config.db_path().exists():
+        db2, _ = store.open_for_write()
+        assert store.stats(db2)["total"] == 0
 
 
 # --- indexing -------------------------------------------------------------

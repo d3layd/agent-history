@@ -1,6 +1,8 @@
 """Path and environment resolution, including the legacy fallback."""
 from __future__ import annotations
 
+import os
+
 
 import pytest
 
@@ -42,17 +44,19 @@ def test_deprecation_warning_is_emitted_once(monkeypatch, tmp_path, capsys):
     assert capsys.readouterr().err == ""
 
 
-def test_extra_dirs_are_colon_separated(monkeypatch, tmp_path):
+def test_extra_dirs_use_the_platform_separator(monkeypatch, tmp_path):
+    """':' would tear 'C:\\Users\\me' in half on Windows."""
     a, b = tmp_path / "a", tmp_path / "b"
-    monkeypatch.setenv("AGENT_HISTORY_EXTRA_DIRS", f"{a}:{b}")
+    monkeypatch.setenv("AGENT_HISTORY_EXTRA_DIRS", f"{a}{os.pathsep}{b}")
     assert config.extra_dirs() == [a, b]
 
 
 def test_extra_dirs_ignores_empty_segments(monkeypatch):
-    monkeypatch.setenv("AGENT_HISTORY_EXTRA_DIRS", "::")
+    monkeypatch.setenv("AGENT_HISTORY_EXTRA_DIRS", os.pathsep * 2)
     assert config.extra_dirs() == []
 
 
+@pytest.mark.skipif(config.WINDOWS, reason="Windows has no POSIX mode bits")
 def test_data_home_is_created_owner_only(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_HISTORY_HOME", str(tmp_path / "secure"))
     path = config.ensure_data_home()
@@ -60,6 +64,7 @@ def test_data_home_is_created_owner_only(monkeypatch, tmp_path):
     assert path.stat().st_mode & 0o777 == 0o700
 
 
+@pytest.mark.skipif(config.WINDOWS, reason="Windows has no POSIX mode bits")
 def test_secure_file_restricts_mode(tmp_path):
     f = tmp_path / "index.db"
     f.write_text("x")
@@ -116,3 +121,11 @@ def test_no_wsl_flag_disables_detection(monkeypatch, tmp_path):
 
 def test_absent_users_dir_is_not_an_error(tmp_path):
     assert config.wsl_windows_homes(_users_dir=tmp_path / "nope") == []
+
+
+@pytest.mark.skipif(not config.WINDOWS, reason="Windows-only behaviour")
+def test_data_home_prefers_localappdata_on_windows(monkeypatch, tmp_path):
+    monkeypatch.delenv("AGENT_HISTORY_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
+    assert config.data_home() == tmp_path / "AppData" / "agent-history"

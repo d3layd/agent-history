@@ -11,6 +11,8 @@ import os
 import sys
 from pathlib import Path
 
+WINDOWS = os.name == "nt"
+
 APP_NAME = "agent-history"
 
 # Windows profile directories that never contain a real user's sessions.
@@ -45,8 +47,15 @@ def data_home() -> Path:
     if explicit:
         return Path(explicit).expanduser()
     xdg = os.environ.get("XDG_DATA_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".local/share"
-    return base / APP_NAME
+    if xdg:
+        return Path(xdg).expanduser() / APP_NAME
+    if WINDOWS:
+        # %LOCALAPPDATA% is where per-machine application data belongs on
+        # Windows; ~/.local/share would be a Unix habit imported badly.
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            return Path(local) / APP_NAME
+    return Path.home() / ".local/share" / APP_NAME
 
 
 def ensure_data_home() -> Path:
@@ -59,15 +68,22 @@ def ensure_data_home() -> Path:
     """
     path = data_home()
     path.mkdir(parents=True, exist_ok=True)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
+    if not WINDOWS:
+        try:
+            path.chmod(0o700)
+        except OSError:
+            pass
     return path
 
 
 def secure_file(path: Path) -> None:
-    """Restrict a file we created to owner-only access."""
+    """Restrict a file we created to owner-only access.
+
+    POSIX only. Windows has no equivalent mode bits, so the index inherits the
+    directory's ACL there — see the README's privacy section.
+    """
+    if WINDOWS:
+        return
     try:
         if path.exists():
             path.chmod(0o600)
@@ -113,9 +129,13 @@ def claude_projects_dir() -> Path:
 
 
 def extra_dirs() -> list[Path]:
-    """Additional transcript roots, colon-separated."""
+    """Additional transcript roots.
+
+    Separated by os.pathsep — ':' on Unix, ';' on Windows. Splitting on ':'
+    everywhere would tear 'C:\\Users\\me' in half.
+    """
     raw = _env("AGENT_HISTORY_EXTRA_DIRS", "")
-    return [Path(p).expanduser() for p in raw.split(":") if p.strip()]
+    return [Path(p).expanduser() for p in raw.split(os.pathsep) if p.strip()]
 
 
 def wsl_enabled() -> bool:

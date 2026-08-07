@@ -5,9 +5,10 @@ import argparse
 import datetime
 import sys
 
-from . import __version__, adapters, config, embed, index, search, store
+from . import __version__, adapters, config, embed, index, search, store, trigger
 
-COMMANDS = {"index", "reindex", "search", "sources", "doctor", "datadir"}
+COMMANDS = {"index", "reindex", "search", "sources", "doctor", "datadir",
+            "trigger"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -25,6 +26,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("sources", help="print the directories that will be scanned")
     sub.add_parser("datadir", help="print the data directory (index, log, lock)")
     sub.add_parser("doctor", help="diagnose the installation")
+
+    trig = sub.add_parser(
+        "trigger", help="index in the background (used by editor hooks)")
+    trig.add_argument("label", nargs="?", default="manual",
+                      help="what triggered this, recorded in the log")
+    trig.add_argument("--if-changed", action="store_true", dest="if_changed",
+                      help="do nothing unless a transcript changed")
+    trig.add_argument("--foreground", action="store_true",
+                      help="wait for indexing instead of detaching")
 
     find = sub.add_parser("search", help="search the index")
     find.add_argument("query", nargs="+")
@@ -121,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
             return index.run(reindex=True)
         if args.command == "sources":
             return _cmd_sources()
+        if args.command == "trigger":
+            return trigger.run(args.label, if_changed=args.if_changed,
+                               foreground=args.foreground)
         if args.command == "datadir":
             print(config.data_home())
             return 0

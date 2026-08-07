@@ -78,11 +78,11 @@ with the tool running in WSL, reaching it over forwarded localhost, and no
 `ollama` binary present at all. `install.sh` will offer to `ollama pull` the
 model when the CLI exists, and tell you to pull it yourself when it doesn't.
 
-**Shell tooling** (only for the auto-indexing scripts, not the CLI): `bash`,
-`find`, `date`, `touch`, `mkdir`. `flock` and `setsid` are used when present and
-degraded around when absent, so macOS works. `curl` is needed by `install.sh`,
-and `pgrep` by the optional cron line. The scripts avoid bash 4 builtins, so the
-bash 3.2 that ships with macOS is fine.
+**No shell is required.** Automatic indexing lives in the CLI itself
+(`agent-history trigger`), so detaching, locking and change detection behave
+identically on Linux, macOS and Windows. The scripts under `scripts/` are
+conveniences for installation and scheduling — `.sh` for Unix, `.ps1` for
+Windows — and the Unix ones avoid bash 4 builtins so macOS's bash 3.2 works.
 
 ## Install
 
@@ -361,8 +361,10 @@ expected, not a bug. For a safety net, add a cron entry that indexes only when a
 session is active and something actually changed:
 
 ```cron
-0 * * * * pgrep -x claude >/dev/null && ~/.../scripts/trigger-index.sh cron --if-changed
+0 * * * * pgrep -x claude >/dev/null && agent-history trigger cron --if-changed
 ```
+
+On Windows, `install.ps1` offers to register the equivalent Scheduled Task.
 
 `--if-changed` compares your transcripts against a stamp file and exits before
 waking Ollama when there is nothing to do, so idle hours cost nothing.
@@ -382,6 +384,35 @@ waking Ollama when there is nothing to do, so idle hours cost nothing.
 Switching `AGENT_HISTORY_MODEL` requires a `reindex` — vectors from different
 models are not comparable. The tool detects the mismatch and tells you, rather
 than silently returning nonsense.
+
+## Platform support
+
+| | status |
+|---|---|
+| **Linux** | fully supported, CI on Python 3.10–3.13 |
+| **macOS** | supported on **Python 3.10**; 3.11–3.13 lack SQLite extension support (see Requirements) |
+| **Windows** | supported, CI on Python 3.10–3.13 — with one caveat below |
+
+**On Windows the index is not owner-only.** POSIX mode bits do not exist there,
+so where Linux and macOS create `index.db` as `0600` inside a `0700` directory,
+Windows falls back to whatever the parent directory's ACL grants. Given the
+index contains credentials that appeared in your transcripts, put
+`AGENT_HISTORY_HOME` somewhere already protected, or restrict it yourself:
+
+```powershell
+icacls "$env:LOCALAPPDATA\agent-history" /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F"
+```
+
+Windows uses `%LOCALAPPDATA%\agent-history` by default rather than
+`~/.local/share`, and `AGENT_HISTORY_EXTRA_DIRS` is separated by `;` there
+rather than `:` — a colon would split drive letters.
+
+Install and sync with the PowerShell equivalents:
+
+```powershell
+.\scripts\install.ps1        # checks Ollama, installs, offers a Scheduled Task
+.\scripts\sync-local.ps1 -Check
+```
 
 ### WSL
 
