@@ -103,23 +103,24 @@ jobs:
               sys.exit('version mismatch across manifests')
           PY
 
-      - name: Hook commands point at files that exist
+      - name: Hook commands are runnable
         run: |
           python3 - <<'PY'
           import json, pathlib, sys
           hooks = json.load(open('hooks/hooks.json'))['hooks']
-          missing = []
           for event, entries in hooks.items():
               for entry in entries:
                   for h in entry.get('hooks', []):
-                      # "${CLAUDE_PLUGIN_ROOT}"/scripts/x.sh ARG -> scripts/x.sh
-                      after_root = h['command'].split('}')[-1]
-                      rel = after_root.strip('"').lstrip('/').split()[0]
-                      if not pathlib.Path(rel).exists():
-                          missing.append((event, rel))
-          if missing:
-              sys.exit(f'hook targets missing: {missing}')
-          print('all hook targets exist')
+                      cmd = h['command']
+                      # Either a bare CLI invocation (cross-platform) or a
+                      # plugin-relative script that must exist in the repo.
+                      if '${CLAUDE_PLUGIN_ROOT}' in cmd:
+                          rel = cmd.split('}')[-1].strip('"').lstrip('/').split()[0]
+                          if not pathlib.Path(rel).exists():
+                              sys.exit(f'{event}: missing script {rel}')
+                      elif not cmd.startswith('agent-history '):
+                          sys.exit(f'{event}: unrecognised hook command {cmd!r}')
+                      print(f'{event}: {cmd}')
           PY
 
       - name: No index or log may ever be tracked
@@ -130,12 +131,45 @@ jobs:
           fi
           echo "no index/log tracked"
 
+  powershell:
+    name: powershell scripts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse the PowerShell scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $failed = $false
+          foreach ($f in Get-ChildItem scripts/*.ps1) {
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                  $f.FullName, [ref]$null, [ref]$errors) | Out-Null
+              if ($errors) {
+                  Write-Host "::error::$($f.Name) has parse errors"
+                  $errors | ForEach-Object { Write-Host "  $_" }
+                  $failed = $true
+              } else {
+                  Write-Host "$($f.Name) parses cleanly"
+              }
+          }
+          if ($failed) { exit 1 }
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          $r = Invoke-ScriptAnalyzer -Path scripts -Severity Error,Warning
+          if ($r) { $r | Format-Table -AutoSize; exit 1 }
+          Write-Host "no analyzer findings"
+
   # Single stable check for branch protection to require. Matrix job names
   # change whenever the matrix does, so gating on them directly is brittle.
   ci-success:
     name: CI success
     if: always()
-    needs: [test, scripts, manifests]
+    needs: [test, scripts, powershell, manifests]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job did not succeed

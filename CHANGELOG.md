@@ -9,6 +9,32 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.5.0] — 2026-08-07
+
+### Added
+- **Windows support.** CI now covers Python 3.10–3.13 on Windows alongside
+  Linux and macOS, plus PowerShell parsing and PSScriptAnalyzer for the new
+  `install.ps1` and `sync-local.ps1`.
+- `agent-history trigger` — automatic indexing moved out of bash and into the
+  CLI, so detaching, locking, change detection and logging behave identically
+  on every platform. The plugin hooks now call it directly, which removes the
+  `${CLAUDE_PLUGIN_ROOT}` script path entirely.
+
+### Fixed
+- `AGENT_HISTORY_EXTRA_DIRS` split on `:`, which tore `C:\Users\...` in half.
+  It now uses the platform separator.
+- `reindex` failed on Windows with `WinError 32` because the index file was
+  still open. Connections are collected first, and the tables are cleared in
+  place if the file is still held.
+- Windows now uses `%LOCALAPPDATA%` rather than `~/.local/share`.
+- A trigger that finds the lock held now gives up after 5 seconds instead of
+  waiting 15 minutes. Nothing is lost — the holder stamps at the start, so the
+  next `--if-changed` run picks up anything written since.
+
+### Changed
+- The index cannot be made owner-only on Windows; POSIX mode bits do not exist
+  there. Documented, with an `icacls` recipe.
+
 ## [0.4.4] — 2026-08-06
 
 ### Added

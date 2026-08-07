@@ -1,7 +1,7 @@
 {
   "name": "history",
   "displayName": "Agent History",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "Semantic search over your past Claude Code sessions, using local Ollama embeddings",
   "author": {
     "name": "Dennis Layden",

@@ -149,10 +149,32 @@ def reset() -> None:
     Removing the file rather than emptying the tables means a reindex onto a
     different model recreates the vector table at the new dimension instead of
     inheriting the old one.
+
+    Windows refuses to unlink a file that is still open, and sqlite3 keeps
+    connections alive until they are garbage collected, so collect first and
+    fall back to emptying the tables if the file is still held.
     """
+    import gc
+
+    gc.collect()
     path = config.db_path()
     for suffix in ("", "-wal", "-shm"):
-        Path(str(path) + suffix).unlink(missing_ok=True)
+        target = Path(str(path) + suffix)
+        try:
+            target.unlink(missing_ok=True)
+        except PermissionError:
+            if suffix:
+                continue
+            # Still open somewhere: clear it in place instead. The vector table
+            # is dropped so a new dimension can be created on the next open.
+            db = _raw_connect(target)
+            try:
+                db.execute("DELETE FROM chunks")
+                db.execute("DROP TABLE IF EXISTS vec_chunks")
+                db.execute("DELETE FROM meta WHERE key IN ('model', 'dimension')")
+                db.commit()
+            finally:
+                db.close()
 
 
 def existing_hashes(db: sqlite3.Connection) -> set[str]:
