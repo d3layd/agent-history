@@ -7,8 +7,14 @@ from __future__ import annotations
 
 import pytest
 
-from agent_history import config, trigger
+from agent_history import config, store, trigger
 from conftest import msg
+
+# These drive a real index, which needs the sqlite-vec extension.
+pytestmark = pytest.mark.skipif(
+    not store.extensions_supported(),
+    reason="this Python cannot load SQLite extensions",
+)
 
 
 def test_indexes_and_writes_to_the_log(transcripts, fake_embed):

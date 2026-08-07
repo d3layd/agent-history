@@ -160,7 +160,11 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
-          $r = Invoke-ScriptAnalyzer -Path scripts -Severity Error,Warning
+          # PSAvoidUsingWriteHost is aimed at reusable functions whose output
+          # should stay pipeable. These are interactive installers whose entire
+          # job is writing to a terminal, so the rule does not apply.
+          $r = Invoke-ScriptAnalyzer -Path scripts -Severity Error,Warning `
+                 -ExcludeRule PSAvoidUsingWriteHost
           if ($r) { $r | Format-Table -AutoSize; exit 1 }
           Write-Host "no analyzer findings"
 

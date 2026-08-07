@@ -57,7 +57,7 @@ Write-Section 'Versions'
 $drift = ($cliV -ne $repoV) -or (($pluginV -ne $repoV) -and ($pluginV -ne 'no-claude'))
 
 if ($Check) {
-    if ($drift) { Write-Warn2 'drift detected — run .\scripts\sync-local.ps1 to fix'; exit 1 }
+    if ($drift) { Write-Warn2 'drift detected - run .\scripts\sync-local.ps1 to fix'; exit 1 }
     Write-Ok 'everything in sync'; exit 0
 }
 

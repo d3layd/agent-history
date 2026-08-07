@@ -25,8 +25,8 @@ function Write-Section($text) { Write-Host "`n$text" -ForegroundColor White }
 function Write-Ok($text)      { Write-Host "  [ok] $text" -ForegroundColor Green }
 function Write-Warn2($text)   { Write-Host "  [!] $text"  -ForegroundColor Yellow }
 
-function Confirm-Step($prompt, $default) {
-    if ($Yes) { return $default -eq 'y' }
+function Confirm-Step($prompt, $default, $assumeYes) {
+    if ($assumeYes) { return $default -eq 'y' }
     $hint = if ($default -eq 'y') { '[Y/n]' } else { '[y/N]' }
     $reply = Read-Host "  $prompt $hint"
     if ([string]::IsNullOrWhiteSpace($reply)) { $reply = $default }
@@ -53,7 +53,7 @@ try {
 if ($tags.models.name -match [regex]::Escape($Model)) {
     Write-Ok "model '$Model' present"
 } elseif ((Get-Command ollama -ErrorAction SilentlyContinue) -and
-          (Confirm-Step "Pull embedding model '$Model' now?" 'y')) {
+          (Confirm-Step "Pull embedding model '$Model' now?" 'y' $Yes)) {
     ollama pull $Model
 } else {
     Write-Warn2 "Model '$Model' is missing. Run: ollama pull $Model"
@@ -71,7 +71,7 @@ except Exception as e:
 "@
 if ($probe -notmatch '^YES') {
     Write-Warn2 "This Python cannot load SQLite extensions: $probe"
-    Write-Warn2 'Install under a Python where it can — see the README.'
+    Write-Warn2 'Install under a Python where it can - see the README.'
 } else {
     Write-Ok 'extensions loadable'
 }
@@ -96,7 +96,7 @@ Write-Host @"
   catches sessions that were killed.
 "@
 
-if (Confirm-Step 'Register an hourly Scheduled Task as the safety net?' 'n') {
+if (Confirm-Step 'Register an hourly Scheduled Task as the safety net?' 'n' $Yes) {
     $action  = New-ScheduledTaskAction -Execute 'agent-history' `
                                        -Argument 'trigger scheduled --if-changed'
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
@@ -110,7 +110,7 @@ if (Confirm-Step 'Register an hourly Scheduled Task as the safety net?' 'n') {
 }
 
 Write-Section 'Building the initial index'
-if (Confirm-Step 'Index your history now? (first run can take a while)' 'y') {
+if (Confirm-Step 'Index your history now? (first run can take a while)' 'y' $Yes) {
     agent-history index
 } else {
     Write-Host "  Run 'agent-history index' when you're ready."
