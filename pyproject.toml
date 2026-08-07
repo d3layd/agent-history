@@ -1,6 +1,6 @@
 [project]
 name = "agent-history"
-version = "0.4.3"
+version = "0.4.4"
 description = "Local semantic search over AI coding agent session transcripts, using Ollama embeddings and sqlite-vec"
 readme = "README.md"
 license = { text = "MIT" }

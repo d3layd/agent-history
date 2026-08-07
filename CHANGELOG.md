@@ -9,6 +9,15 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.4.4] — 2026-08-06
+
+### Added
+- `main` is protected: changes require a pull request with green CI. A
+  `ci-success` job aggregates the matrix so protection can require one stable
+  check rather than job names that shift with the matrix.
+- Merging a version bump to `main` now tags it and publishes a GitHub release
+  automatically, using that version's CHANGELOG entry as the notes.
+
 ## [0.4.3] — 2026-08-06
 
 ### Documentation
