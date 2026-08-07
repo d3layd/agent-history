@@ -129,3 +129,18 @@ jobs:
             exit 1
           fi
           echo "no index/log tracked"
+
+  # Single stable check for branch protection to require. Matrix job names
+  # change whenever the matrix does, so gating on them directly is brittle.
+  ci-success:
+    name: CI success
+    if: always()
+    needs: [test, scripts, manifests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job did not succeed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "::error::one or more CI jobs failed"
+          exit 1
+      - run: echo "all jobs green"

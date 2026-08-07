@@ -1,0 +1,96 @@
+name: Release
+
+# Runs after a merge to main. If the version in pyproject.toml has changed and
+# no matching tag exists yet, tag it and publish a GitHub release using that
+# version's CHANGELOG entry as the notes. Docs-only merges leave the version
+# alone and this does nothing.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version and decide whether to release
+        id: check
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read version from pyproject.toml"
+            exit 1
+          fi
+          # The version reaches git and gh as an argument, so constrain its
+          # shape rather than trusting whatever the file happens to contain.
+          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$'; then
+            echo "::error::version '$VERSION' is not a plain semver string"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "  v$VERSION already tagged — nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "  v$VERSION is new — releasing"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify manifests agree on the version
+        if: steps.check.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys, pathlib
+          want = os.environ['VERSION']
+          plugin = json.load(open('.claude-plugin/plugin.json'))['version']
+          init = re.search(r'__version__ = "([^"]+)"',
+                           pathlib.Path('src/agent_history/__init__.py').read_text()).group(1)
+          if not want == plugin == init:
+              sys.exit(f'version mismatch: pyproject={want} plugin.json={plugin} __init__={init}')
+          print(f'all manifests agree on {want}')
+          PY
+
+      - name: Extract the CHANGELOG entry
+        if: steps.check.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          python3 - <<'PY' > release-notes.md
+          import os, pathlib, re
+          version = os.environ['VERSION']
+          text = pathlib.Path('CHANGELOG.md').read_text()
+          # Take everything between this version's heading and the next one.
+          match = re.search(
+              rf'^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)',
+              text, re.M | re.S)
+          if match:
+              print(match.group(1).strip())
+          else:
+              print(f'Release {version}.')
+              print()
+              print('See CHANGELOG.md for details.')
+          PY
+          echo "--- notes ---"; cat release-notes.md
+
+      - name: Tag and publish
+        if: steps.check.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "agent-history $VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes-file release-notes.md

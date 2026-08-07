@@ -473,6 +473,23 @@ working.
 - Search quality is bounded by the embedding model. `nomic-embed-text` is a good
   default; `mxbai-embed-large` is slower and somewhat better.
 
+## Contributing
+
+`main` is protected: changes go through a pull request and CI has to be green
+before it can merge.
+
+```console
+$ git checkout -b my-change
+$ uv run pytest
+$ git push -u origin my-change
+$ gh pr create
+```
+
+Merging a version bump to `main` tags it and publishes a GitHub release
+automatically, using that version's `CHANGELOG.md` entry as the notes. Merges
+that don't touch the version are silent. Keep `pyproject.toml`,
+`plugin.json` and `__init__.py` in agreement — CI fails if they drift.
+
 ## Contact
 
 Issues and pull requests are welcome on GitHub. For anything else:
