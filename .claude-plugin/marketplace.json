@@ -1,0 +1,15 @@
+{
+  "name": "agent-history",
+  "description": "Local semantic search over your AI coding agent session transcripts",
+  "owner": {
+    "name": "Dennis Layden",
+    "email": "github@dennislayden.com"
+  },
+  "plugins": [
+    {
+      "name": "history",
+      "source": "./",
+      "description": "Semantic search over your past Claude Code sessions, using local Ollama embeddings"
+    }
+  ]
+}

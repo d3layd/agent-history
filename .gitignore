@@ -1,0 +1,15 @@
+# Index data — never commit. Contains full transcript text.
+*.db
+*.db-wal
+*.db-shm
+*.log
+.last-index
+.index.lock
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/

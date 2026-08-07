@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # macOS matters here: it ships bash 3.2 and lacks setsid, both of which the
+    # indexing scripts have to cope with.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run tests on Python ${{ matrix.python }}
+        run: uv run --python ${{ matrix.python }} --group dev pytest -q
+
+      # Reported, not enforced. Extension support is a property of the Python
+      # build: uv's macOS builds for 3.11+ lack it, so the vector tests skip
+      # there while everything else still runs. Enforcing it would either make
+      # the matrix permanently red or hide the limitation.
+      - name: Report sqlite3 extension support
+        run: |
+          uv run --python ${{ matrix.python }} python -c "
+          import sqlite3
+          db = sqlite3.connect(':memory:')
+          try:
+              db.enable_load_extension(True)
+              print('sqlite', sqlite3.sqlite_version, '- extensions: YES')
+          except Exception as e:
+              print('sqlite', sqlite3.sqlite_version, '- extensions: NO -', e)
+          "
+
+  scripts:
+    name: shell scripts
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check
+        run: |
+          bash --version | head -1
+          bash -n scripts/trigger-index.sh
+          bash -n scripts/install.sh
+          bash -n scripts/sync-local.sh
+
+      - name: Reject bash 4+ builtins
+        # macOS ships bash 3.2, so these must not appear. The grep excludes
+        # comments, which legitimately mention `mapfile` to explain its absence.
+        run: |
+          if grep -nE '^[^#]*\b(mapfile|readarray)\b|declare -A|\$\{[A-Za-z_]+(\^\^|,,)\}' scripts/*.sh; then
+            echo "::error::bash 4+ construct found; macOS ships bash 3.2"
+            exit 1
+          fi
+          echo "no bash 4+ constructs"
+
+      - name: ShellCheck
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck -S warning scripts/*.sh
+
+  manifests:
+    name: plugin manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Valid JSON
+        run: |
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json; do
+            python3 -c "import json;json.load(open('$f'));print('$f OK')"
+          done
+
+      - name: Versions agree across manifests
+        run: |
+          python3 - <<'PY'
+          import json, re, sys, pathlib
+          plugin = json.load(open('.claude-plugin/plugin.json'))['version']
+          pyproj = re.search(r'^version = "([^"]+)"',
+                             pathlib.Path('pyproject.toml').read_text(), re.M).group(1)
+          init = re.search(r'__version__ = "([^"]+)"',
+                           pathlib.Path('src/agent_history/__init__.py').read_text()).group(1)
+          print(f'plugin.json={plugin} pyproject={pyproj} __init__={init}')
+          if not plugin == pyproj == init:
+              sys.exit('version mismatch across manifests')
+          PY
+
+      - name: Hook commands point at files that exist
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          hooks = json.load(open('hooks/hooks.json'))['hooks']
+          missing = []
+          for event, entries in hooks.items():
+              for entry in entries:
+                  for h in entry.get('hooks', []):
+                      # "${CLAUDE_PLUGIN_ROOT}"/scripts/x.sh ARG -> scripts/x.sh
+                      after_root = h['command'].split('}')[-1]
+                      rel = after_root.strip('"').lstrip('/').split()[0]
+                      if not pathlib.Path(rel).exists():
+                          missing.append((event, rel))
+          if missing:
+              sys.exit(f'hook targets missing: {missing}')
+          print('all hook targets exist')
+          PY
+
+      - name: No index or log may ever be tracked
+        run: |
+          if git ls-files | grep -Ei '\.(db|log)$'; then
+            echo "::error::an index or log file is tracked; these contain transcript text"
+            exit 1
+          fi
+          echo "no index/log tracked"

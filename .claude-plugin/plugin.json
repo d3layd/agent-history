@@ -1,0 +1,20 @@
+{
+  "name": "history",
+  "displayName": "Agent History",
+  "version": "0.4.3",
+  "description": "Semantic search over your past Claude Code sessions, using local Ollama embeddings",
+  "author": {
+    "name": "Dennis Layden",
+    "email": "github@dennislayden.com",
+    "url": "https://github.com/d3layd"
+  },
+  "homepage": "https://github.com/d3layd/agent-history",
+  "license": "MIT",
+  "keywords": [
+    "search",
+    "history",
+    "memory",
+    "ollama",
+    "embeddings"
+  ]
+}
