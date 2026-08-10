@@ -9,6 +9,18 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.14.0] — 2026-08-10
+
+### Changed
+- **Injected context is now project-aware.** Retrieval is similarity-only and
+  spans every project on the machine, so an excerpt from an unrelated project
+  can rank high on a given prompt. The injected header now names the current
+  project (from the hook's cwd) and tells the agent to check each excerpt
+  against the current task and disregard ones from a different project —
+  making the strong model the segmentation layer the embedder can't be. A
+  stopgap until real per-project scoping lands (#16 / roadmap); deliberate
+  `search` stays fully cross-project.
+
 ## [0.13.0] — 2026-08-10
 
 ### Changed

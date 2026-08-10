@@ -95,6 +95,17 @@ def test_system_message_pluralizes(fake_embed, capsys, monkeypatch):
     assert len([ln for ln in msg.splitlines() if ln.strip().startswith("·")]) == 3
 
 
+def test_context_header_names_project_and_instructs_filtering(indexed, capsys,
+                                                              monkeypatch):
+    from agent_history import textproc
+    enable(monkeypatch)
+    _code, out = hook("why did we split the auth middleware", capsys)
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "current project is /w" in ctx          # cwd from the hook payload
+    assert "different project" in ctx               # instructed to filter
+    assert textproc.is_injection(ctx)               # still loop-guarded
+
+
 def test_env_one_overrides_off_marker(indexed, capsys, monkeypatch):
     config.ensure_data_home()
     config.inject_off_path().touch()          # disabled via marker
