@@ -162,6 +162,33 @@ the transcript often no longer exists (see below). The viewer serves the same
 search and conversation views in a browser, binds strictly to loopback, and
 has no flag to change that.
 
+### Indexing documentation trees
+
+Transcripts answer "what was said"; a docs tree answers "what was written
+down". Name your documentation roots and both land in the same index:
+
+```console
+$ AGENT_HISTORY_DOCS_DIRS=~/ops-library:~/notes agent-history index
+$ agent-history search "gateway restart runbook" --agent docs
+```
+
+(Unix shell shown; on Windows separate roots with `;` and set the variable
+with your shell's syntax, e.g. `$env:AGENT_HISTORY_DOCS_DIRS` in PowerShell.)
+
+(Export the variable persistently for the hooks to pick it up.) This is
+opt-in only — nothing is auto-detected. Markdown and `.txt` files are
+indexed recursively; vendored and hidden directories (`node_modules`,
+`.git`, …) are pruned, and files over 2MB are treated as logs and skipped.
+
+**Edited docs leave their old text behind.** The store is append-only by
+design — for transcripts that permanence is the whole point, because the
+source files get deleted. Docs are different: they are the one *mutable*
+source, so rewriting a document adds chunks for the new text while the old
+text's chunks remain and keep matching searches (check the timestamps when
+two versions of a runbook both surface). Append-mostly files, like daily
+logs, are unaffected. Refresh-on-change for docs is planned; until then,
+this fits stable reference material better than fast-churning drafts.
+
 Start with `doctor` if anything misbehaves — it reports whether Ollama is
 reachable, whether the model is pulled, what was detected, and how much is
 indexed.

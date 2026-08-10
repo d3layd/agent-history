@@ -44,6 +44,7 @@ class Adapter(Protocol):
 def all_adapters() -> list[Adapter]:
     from .claude_code import ClaudeCodeAdapter
     from .codex import CodexAdapter
+    from .docs import DocsAdapter
     from .hermes import HermesAdapter
     from .openclaw import OpenClawAdapter
     from .opencode import OpenCodeAdapter
@@ -54,6 +55,7 @@ def all_adapters() -> list[Adapter]:
         OpenCodeAdapter(),
         HermesAdapter(),
         OpenClawAdapter(),
+        DocsAdapter(),
     ]
 
 

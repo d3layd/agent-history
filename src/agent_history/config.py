@@ -201,6 +201,16 @@ def openclaw_dirs() -> list[Path]:
     return [Path.home() / ".openclaw"]
 
 
+def docs_dirs() -> list[Path]:
+    """Documentation trees to index — opt-in only, nothing is auto-detected.
+
+    A docs tree could live anywhere, and guessing would mean reading
+    directories the user never offered. os.pathsep-separated.
+    """
+    raw = _env("AGENT_HISTORY_DOCS_DIRS", "")
+    return [Path(p).expanduser() for p in raw.split(os.pathsep) if p.strip()]
+
+
 def extra_dirs() -> list[Path]:
     """Additional transcript roots.
 

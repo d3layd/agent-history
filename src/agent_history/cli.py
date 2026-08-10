@@ -117,6 +117,12 @@ def _cmd_doctor() -> int:
     else:
         print("adapter:    none detected")
 
+    # Auto-detected adapters are rightly silent when absent, but DOCS_DIRS is
+    # an explicit statement of intent — a typo there must not just quietly
+    # index nothing.
+    for missing in (d for d in config.docs_dirs() if not d.is_dir()):
+        print(f"docs:       WARNING configured root does not exist: {missing}")
+
     if not config.db_path().exists():
         print("index:      not built yet — run: agent-history index")
         return 0 if ok else 1

@@ -9,6 +9,22 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.8.0] — 2026-08-10
+
+### Added
+- **Docs adapter** — index arbitrary documentation trees (`*.md`,
+  `*.markdown`, `*.txt`) alongside transcripts, so one search spans "what
+  was said" and "what was written down": runbooks, ops notes, session
+  summaries. Entirely opt-in via `AGENT_HISTORY_DOCS_DIRS`
+  (os.pathsep-separated roots) — nothing is auto-detected, because guessing
+  at documentation locations would mean reading directories the user never
+  offered. Trees are walked with vendored/hidden directories pruned
+  (`node_modules`, `.git`, dot-directories, build output), files over 2MB
+  are skipped as logs rather than documents, and records carry `role="doc"`
+  with the file's path as a stable identifier. This closes the gap with
+  hand-rolled doc indexers (e.g. a semsearch-style ops corpus) so a single
+  agent-history install can replace them.
+
 ## [0.7.0] — 2026-08-09
 
 ### Added

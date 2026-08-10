@@ -1,3 +1,3 @@
 """Local semantic search over AI coding agent session transcripts."""
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
