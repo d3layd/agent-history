@@ -43,6 +43,10 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 
 class DocsAdapter:
     name = AGENT
+    # Docs are the store's one mutable source: files get edited, and their
+    # old chunks must be refreshed away rather than accumulate. Transcript
+    # adapters are append-only and never set this.
+    mutable = True
 
     def roots(self) -> list[Path]:
         return [d for d in config.docs_dirs() if d.is_dir()]

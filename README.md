@@ -168,26 +168,31 @@ Transcripts answer "what was said"; a docs tree answers "what was written
 down". Name your documentation roots and both land in the same index:
 
 ```console
-$ AGENT_HISTORY_DOCS_DIRS=~/ops-library:~/notes agent-history index
+$ agent-history docs add ~/ops-library     # persisted; hooks pick it up
+$ agent-history index
 $ agent-history search "gateway restart runbook" --agent docs
 ```
 
-(Unix shell shown; on Windows separate roots with `;` and set the variable
-with your shell's syntax, e.g. `$env:AGENT_HISTORY_DOCS_DIRS` in PowerShell.)
+`docs add` stores the root in the data directory, which is sturdier than an
+environment variable — hook processes don't reliably inherit shell exports,
+Windows especially. `docs list` and `docs remove` manage the set;
+`$AGENT_HISTORY_DOCS_DIRS` (os.pathsep-separated) still works and is merged
+in.
 
 (Export the variable persistently for the hooks to pick it up.) This is
 opt-in only — nothing is auto-detected. Markdown and `.txt` files are
 indexed recursively; vendored and hidden directories (`node_modules`,
 `.git`, …) are pruned, and files over 2MB are treated as logs and skipped.
 
-**Edited docs leave their old text behind.** The store is append-only by
-design — for transcripts that permanence is the whole point, because the
-source files get deleted. Docs are different: they are the one *mutable*
-source, so rewriting a document adds chunks for the new text while the old
-text's chunks remain and keep matching searches (check the timestamps when
-two versions of a runbook both surface). Append-mostly files, like daily
-logs, are unaffected. Refresh-on-change for docs is planned; until then,
-this fits stable reference material better than fast-churning drafts.
+**Edited docs are refreshed, not accumulated.** Docs are the one *mutable*
+source the store reads, so they get the one delete path it has: when a
+re-indexed document no longer contains some previously indexed text, those
+chunks are removed — from the vector index and the full-text index too. The
+rule is deliberately conservative: only a document that was actually
+re-read is eligible, text still produced by *anything* this run survives,
+and a doc deleted from disk keeps its chunks. Transcripts are append-only
+in reality and stay append-only here; for them the index's permanence is
+the whole point.
 
 Start with `doctor` if anything misbehaves — it reports whether Ollama is
 reachable, whether the model is pulled, what was detected, and how much is

@@ -9,6 +9,23 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.9.0] — 2026-08-10
+
+### Added
+- **Refresh-on-change for docs** — the store's first and only delete path.
+  When a re-indexed document no longer contains previously indexed text,
+  those chunks are removed from the chunk store, the vector index, and the
+  full-text index. Deliberately narrow: only mutable sources (the docs
+  adapter marks itself `mutable`) are eligible, only origins actually
+  re-read this run are considered, any hash produced by *any* source this
+  run survives, and a document deleted from disk keeps its chunks.
+  Transcript data is structurally untouchable. Runs even when a pure
+  deletion produces no new chunks.
+- `agent-history docs add|remove|list` — persist documentation roots in
+  the data directory instead of relying on an environment variable, which
+  hook processes don't reliably inherit (Windows especially).
+  `$AGENT_HISTORY_DOCS_DIRS` still works and is merged in.
+
 ## [0.8.0] — 2026-08-10
 
 ### Added
