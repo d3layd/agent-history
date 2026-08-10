@@ -21,6 +21,13 @@ PREVIEW_CHARS = 600
 JSON_PREVIEW_CHARS = 500
 
 MODES = ("hybrid", "vector", "text")
+SORTS = ("relevance", "newest")
+
+# Scores within a rounding bucket are treated as tied, and ties go to the
+# newer chunk — so superseded information only outranks its correction when
+# relevance genuinely separates them. Deliberately mild: no decay curves.
+SCORE_TIE_DECIMALS = 4      # RRF scores (~0.016-0.033)
+DISTANCE_TIE_DECIMALS = 1   # L2 distances (~14-20)
 
 
 def search_rows(
@@ -30,6 +37,7 @@ def search_rows(
     cwd: str | None = None,
     agent: str | None = None,
     mode: str = "hybrid",
+    sort: str = "relevance",
 ) -> list[dict]:
     """Run one search and return result dicts — shared by the CLI and viewer."""
     db = store.open_for_read(check_model=(mode != "text"))
@@ -58,7 +66,34 @@ def search_rows(
             else:
                 rows = store.hybrid_query(db, vector, query, k, **narrowing)
 
-    return [_as_dict(row) for row in rows]
+    return _order([_as_dict(row) for row in rows], sort)
+
+
+def _order(results: list[dict], sort: str) -> list[dict]:
+    """Order results: newest-first, or relevance with a recency tiebreak.
+
+    ISO 8601 timestamps compare lexicographically, so string comparison is
+    chronological; empty timestamps sort last either way.
+    """
+    def when(r: dict) -> str:
+        return r.get("timestamp") or ""
+
+    if sort == "newest":
+        return sorted(results, key=when, reverse=True)
+
+    if not any(r.get("score") is not None or r.get("distance") is not None
+               for r in results):
+        return results  # pure text mode: BM25 order is the relevance order
+
+    def rank(r: dict):
+        if r.get("score") is not None:
+            return -round(r["score"], SCORE_TIE_DECIMALS)
+        return round(r["distance"], DISTANCE_TIE_DECIMALS)
+
+    # Two-pass stable sort: newest-first first, then by bucketed relevance —
+    # equal buckets keep the newer row in front.
+    newest_first = sorted(results, key=when, reverse=True)
+    return sorted(newest_first, key=rank)
 
 
 def run(
@@ -68,10 +103,11 @@ def run(
     cwd: str | None = None,
     agent: str | None = None,
     mode: str = "hybrid",
+    sort: str = "relevance",
     full: bool = False,
     as_json: bool = False,
 ) -> int:
-    results = search_rows(query, k=k, cwd=cwd, agent=agent, mode=mode)
+    results = search_rows(query, k=k, cwd=cwd, agent=agent, mode=mode, sort=sort)
 
     if as_json:
         print(json.dumps([_trim(dict(r), full) for r in results], indent=2))
