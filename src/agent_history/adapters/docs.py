@@ -55,8 +55,14 @@ class DocsAdapter:
         return bool(self.roots())
 
     def records(self) -> Iterator[Record]:
+        # `scanned` is every origin whose text was actually read this pass —
+        # the refresh eligibility set. It must not be derived from yielded
+        # records: a file shrunk below MIN_CHARS yields nothing but was
+        # still read, and its old chunks must still be refreshed away.
+        self.scanned: set[str] = set()
         for root in self.roots():
             for path in _eligible_files(root):
+                self.scanned.add(str(path))
                 yield from self._read_doc(root, path)
 
     def watch_files(self) -> Iterator[Path]:

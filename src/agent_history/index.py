@@ -31,10 +31,7 @@ def _pending(
     mutable_targets: set[tuple[str, str]] = set()
     for adapter in adapters.available_adapters():
         count = 0
-        mutable = getattr(adapter, "mutable", False)
         for record in adapter.records():
-            if mutable:
-                mutable_targets.add((record.agent, record.origin))
             for piece in chunk_text(record.text):
                 digest = hashlib.sha256(piece.encode("utf-8")).hexdigest()
                 produced.add(digest)
@@ -43,6 +40,14 @@ def _pending(
                 seen.add(digest)
                 out.append((record, piece, digest))
                 count += 1
+        if getattr(adapter, "mutable", False):
+            # Eligibility comes from what was read, not what was yielded —
+            # a doc shrunk below the indexing minimum yields no records but
+            # must still have its stale chunks refreshed.
+            mutable_targets.update(
+                (adapter.name, origin)
+                for origin in getattr(adapter, "scanned", ())
+            )
         print(f"  {adapter.name}: {count} new chunk(s)")
     return out, produced, sorted(mutable_targets)
 

@@ -107,6 +107,30 @@ def test_hash_shared_with_a_transcript_survives_the_doc_edit(
         "text still produced by the transcript must not be deleted"
 
 
+def test_doc_shrunk_below_minimum_is_still_refreshed(docs_root, fake_embed):
+    """A stubbed-out doc yields no records but was read — its old text must
+    go. This is the case record-derived eligibility gets wrong."""
+    doc = docs_root / "runbook.md"
+    doc.write_text("A full procedure that is about to be stubbed out entirely.")
+    index.run()
+    doc.write_text("todo")
+    assert index.run() == 0
+    assert "about to be stubbed" not in " ".join(texts())
+
+
+def test_doc_grown_past_the_size_cap_keeps_its_chunks(docs_root, fake_embed):
+    """An oversized file is never read, so its content cannot be judged —
+    like an unreadable file, its existing chunks stay."""
+    from agent_history.adapters.docs import MAX_FILE_BYTES
+
+    doc = docs_root / "log.md"
+    doc.write_text("Original content indexed before the file blew up.")
+    index.run()
+    doc.write_text("x" * (MAX_FILE_BYTES + 1))
+    index.run()
+    assert any("before the file blew up" in t for t in texts())
+
+
 def test_doc_deleted_from_disk_keeps_its_chunks(docs_root, fake_embed):
     doc = docs_root / "gone.md"
     doc.write_text("Content whose source file is about to disappear.")
