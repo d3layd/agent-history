@@ -116,6 +116,18 @@ def test_malformed_lines_do_not_abort_the_file(rollouts):
     assert len(records()) == 2
 
 
+def test_non_mapping_payload_does_not_abort_the_file(rollouts):
+    """`"payload": [...]` is valid JSON; it must be skipped, not crash."""
+    path = rollouts("a", [meta()])
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"timestamp": "t", "type": "response_item",
+                            "payload": [1, 2, 3]}) + "\n")
+        f.write(json.dumps(message("user", "a real message after the odd line"))
+                + "\n")
+    got = records()
+    assert len(got) == 1
+
+
 def test_unavailable_without_directory(isolated_env):
     assert CodexAdapter().available() is False
 

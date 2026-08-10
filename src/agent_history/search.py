@@ -32,7 +32,7 @@ def search_rows(
     mode: str = "hybrid",
 ) -> list[dict]:
     """Run one search and return result dicts — shared by the CLI and viewer."""
-    db = store.open_for_read()
+    db = store.open_for_read(check_model=(mode != "text"))
     narrowing = {"cwd": cwd, "agent": agent}
 
     if mode == "text":

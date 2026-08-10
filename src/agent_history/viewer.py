@@ -213,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(show.rows_for(
                     target,
                     around=params.get("around") or None,
-                    limit=min(int(params.get("limit", "60")), 500),
+                    limit=max(1, min(int(params.get("limit", "60")), 500)),
                 ))
             else:
                 self._send(404, b"not found", "text/plain")
@@ -228,16 +228,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        # Belt and braces for a loopback service: no other origin may read it.
-        self.send_header("Access-Control-Allow-Origin", "null")
+        # No CORS header at all: the bundled page is same-origin, and
+        # `Access-Control-Allow-Origin: null` would grant opaque origins
+        # (sandboxed iframes, file:// pages) read access to the index.
         self.end_headers()
         self.wfile.write(body)
 
 
 def run(port: int = DEFAULT_PORT) -> int:
-    store.open_for_read()  # fail before binding when there is no index
+    store.open_for_read(check_model=False)  # fail before binding if no index
     server = ThreadingHTTPServer((HOST, port), Handler)
-    print(f"agent-history viewer: http://{HOST}:{port}  (Ctrl-C to stop)")
+    # Report the bound port, which differs from the request when port=0.
+    print(f"agent-history viewer: http://{HOST}:{server.server_address[1]}  "
+          "(Ctrl-C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

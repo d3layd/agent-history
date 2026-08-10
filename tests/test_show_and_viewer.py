@@ -55,6 +55,11 @@ def test_limit_keeps_the_end_of_the_conversation(conversation):
     ]
 
 
+def test_zero_limit_cannot_bypass_the_cap(conversation):
+    """rows[-0:] would return the whole conversation."""
+    assert len(show.rows_for("s1", limit=0)) == 1
+
+
 def test_around_centres_the_window(conversation):
     rows = show.rows_for("s1", around="2026-01-01T03:00:00Z", limit=3)
     texts = [r["text"] for r in rows]
@@ -95,6 +100,8 @@ def test_viewer_binds_loopback_and_serves_the_api(conversation):
         conn.request("GET", "/api/session?session=s1&limit=2")
         resp = conn.getresponse()
         assert resp.status == 200
+        # No CORS header: ACAO 'null' would let opaque origins read the index.
+        assert resp.getheader("Access-Control-Allow-Origin") is None
         assert "message number 6" in resp.read().decode()
 
         conn.request("GET", "/")

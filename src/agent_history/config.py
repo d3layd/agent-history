@@ -134,7 +134,10 @@ def codex_session_dirs() -> list[Path]:
     if explicit:
         return [Path(explicit).expanduser()]
     dirs = [Path.home() / ".codex/sessions"]
-    dirs += [home / ".codex/sessions" for home in wsl_windows_homes()]
+    # Select the Windows profile by the Codex marker, not the Claude one — a
+    # profile that only ever ran Codex must still be discoverable.
+    dirs += [home / ".codex/sessions"
+             for home in wsl_windows_homes(marker=".codex/sessions")]
     return dirs
 
 
@@ -178,7 +181,8 @@ def wsl_enabled() -> bool:
     return flag.strip().lower() not in {"1", "true", "yes"}
 
 
-def wsl_windows_homes(_users_dir: Path | None = None) -> list[Path]:
+def wsl_windows_homes(_users_dir: Path | None = None,
+                      marker: str = ".claude/projects") -> list[Path]:
     """The Windows user profile to index from WSL, if it is unambiguous.
 
     /mnt/c/Users holds every account on the machine, and WSL cannot reliably
@@ -187,6 +191,10 @@ def wsl_windows_homes(_users_dir: Path | None = None) -> list[Path]:
     is auto-selected only when exactly one candidate has transcripts. When
     several do, none is chosen and the caller is told to name one explicitly
     via AGENT_HISTORY_EXTRA_DIRS.
+
+    `marker` is the per-agent directory that identifies a candidate profile —
+    each adapter passes its own, so a profile that only ever ran one agent is
+    still found by that agent's adapter.
 
     Returns an empty list on native Linux and macOS, where /mnt/c is absent.
 
@@ -205,7 +213,7 @@ def wsl_windows_homes(_users_dir: Path | None = None) -> list[Path]:
             if p.is_dir()
             and p.name not in _WSL_SKIP
             and not p.name.startswith("TEMP")
-            and (p / ".claude/projects").is_dir()
+            and (p / marker).is_dir()
         ]
     except OSError:
         return []
@@ -217,7 +225,7 @@ def wsl_windows_homes(_users_dir: Path | None = None) -> list[Path]:
         print(
             f"note: several Windows profiles have transcripts ({names}); "
             "skipping them all. Set AGENT_HISTORY_EXTRA_DIRS to the one you "
-            "want, e.g. /mnt/c/Users/<you>/.claude/projects",
+            f"want, e.g. /mnt/c/Users/<you>/{marker}",
             file=sys.stderr,
         )
     return []

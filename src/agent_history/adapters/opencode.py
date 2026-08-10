@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime
 import json
 import sqlite3
+import urllib.parse
 from pathlib import Path
 from typing import Iterator
 
@@ -39,7 +40,10 @@ class OpenCodeAdapter:
 
     def _read_db(self, path: Path) -> Iterator[Record]:
         try:
-            db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            # Percent-encode: '#', '?' or '%' in a path would otherwise be
+            # parsed as URI syntax and open the wrong file.
+            db = sqlite3.connect(
+                f"file:{urllib.parse.quote(str(path))}?mode=ro", uri=True)
         except sqlite3.Error:
             return
         try:

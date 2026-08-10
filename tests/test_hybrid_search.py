@@ -98,6 +98,16 @@ def test_search_rows_text_mode_needs_no_embedding(db, monkeypatch):
     assert got[0]["distance"] is None
 
 
+def test_text_mode_ignores_a_model_mismatch(db, monkeypatch):
+    """Text search never embeds, so a different configured model is fine."""
+    put(db, "text search should survive an embedding model change")
+    monkeypatch.setenv("AGENT_HISTORY_MODEL", "some-other-model")
+    got = search.search_rows("model change", mode="text")
+    assert len(got) == 1
+    with pytest.raises(store.StoreError):
+        search.search_rows("model change", mode="vector")
+
+
 def test_search_rows_hybrid_falls_back_to_text_when_embed_fails(db, monkeypatch):
     put(db, "hybrid degrades to text search when the embedder is unreachable")
 

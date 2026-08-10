@@ -20,7 +20,8 @@ PER_CHUNK_CHARS = 2000
 def rows_for(target: str, *, around: str | None = None,
              limit: int = 40) -> list[dict]:
     """Chunks of the conversation `target` belongs to, oldest first."""
-    db = store.open_for_read()
+    limit = max(1, limit)  # limit=0 would make rows[-limit:] return everything
+    db = store.open_for_read(check_model=False)  # show never embeds
     rows = store.session_rows(db, origin=target, session_id=target)
     if not rows:
         return []

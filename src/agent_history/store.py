@@ -127,7 +127,13 @@ def open_for_write() -> tuple[sqlite3.Connection, int]:
     return db, int(stored_dim or 0)
 
 
-def open_for_read() -> sqlite3.Connection:
+def open_for_read(check_model: bool = True) -> sqlite3.Connection:
+    """Open the index read-only-ish.
+
+    `check_model=False` skips the embedding-model identity check — correct for
+    text-only search, which never embeds and works fine against an index built
+    with any model.
+    """
     path = config.db_path()
     if not path.exists():
         raise StoreError(
@@ -136,7 +142,7 @@ def open_for_read() -> sqlite3.Connection:
     db = _raw_connect(path)
     stored_model = _get_meta(db, "model")
     wanted = config.model()
-    if stored_model and stored_model != wanted:
+    if check_model and stored_model and stored_model != wanted:
         raise StoreError(
             f"index was built with model '{stored_model}' but '{wanted}' is "
             f"configured; a query embedded with a different model cannot match.\n"

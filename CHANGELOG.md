@@ -39,6 +39,8 @@ they have no corresponding tags.
   could never notice a change in a database-backed source. File roots (and
   their `-wal` sidecars) are now checked directly.
 
+## [0.5.0] — 2026-08-07
+
 ### Added
 - **Windows support.** CI now covers Python 3.10–3.13 on Windows alongside
   Linux and macOS, plus PowerShell parsing and PSScriptAnalyzer for the new

@@ -38,7 +38,8 @@ with no Ollama running at all.
 - **Python 3.10+**, with a `sqlite3` module that permits extension loading (see
   below)
 - **[Ollama](https://ollama.com) reachable over HTTP**, with an embedding model
-  pulled
+  pulled — needed for indexing and for vector/hybrid search. `--mode text`
+  (BM25 full-text) works without it.
 - **[`uv`](https://docs.astral.sh/uv/)** to install
 
 ```console

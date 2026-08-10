@@ -123,6 +123,17 @@ def test_absent_users_dir_is_not_an_error(tmp_path):
     assert config.wsl_windows_homes(_users_dir=tmp_path / "nope") == []
 
 
+def test_profile_with_only_codex_is_found_by_its_marker(monkeypatch, tmp_path):
+    """A Windows profile that only ever ran Codex has no .claude/projects, but
+    the Codex adapter must still discover it."""
+    users = tmp_path / "Users"
+    (users / "dana" / ".codex/sessions").mkdir(parents=True)
+    monkeypatch.delenv("AGENT_HISTORY_NO_WSL", raising=False)
+    assert config.wsl_windows_homes(_users_dir=users) == []
+    found = config.wsl_windows_homes(_users_dir=users, marker=".codex/sessions")
+    assert [p.name for p in found] == ["dana"]
+
+
 @pytest.mark.skipif(not config.WINDOWS, reason="Windows-only behaviour")
 def test_data_home_prefers_localappdata_on_windows(monkeypatch, tmp_path):
     monkeypatch.delenv("AGENT_HISTORY_HOME", raising=False)

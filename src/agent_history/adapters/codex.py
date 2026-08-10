@@ -67,7 +67,9 @@ class CodexAdapter:
                     continue
                 if not isinstance(entry, dict):
                     continue
-                payload = entry.get("payload") or {}
+                payload = entry.get("payload")
+                if not isinstance(payload, dict):
+                    continue
                 kind = entry.get("type")
 
                 if kind == "session_meta":

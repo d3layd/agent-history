@@ -59,8 +59,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     serve = sub.add_parser(
         "serve", help="local web viewer on 127.0.0.1 (loopback only)")
-    serve.add_argument("--port", type=int, default=viewer.DEFAULT_PORT)
+    serve.add_argument("--port", type=_port, default=viewer.DEFAULT_PORT,
+                       help="1-65535, or 0 for an OS-assigned port")
     return parser
+
+
+def _port(value: str) -> int:
+    number = int(value)
+    if not 0 <= number <= 65535:
+        raise argparse.ArgumentTypeError(f"invalid port: {value}")
+    return number
 
 
 def _normalise(argv: list[str]) -> list[str]:
