@@ -128,6 +128,34 @@ def claude_projects_dir() -> Path:
     return Path.home() / ".claude/projects"
 
 
+def inject_flag_path() -> Path:
+    return data_home() / "inject.on"
+
+
+def inject_enabled() -> bool:
+    """Context injection is opt-in: a flag file, overridable by env."""
+    env = (_env("AGENT_HISTORY_INJECT", "") or "").strip().lower()
+    if env in {"1", "true", "yes"}:
+        return True
+    if env in {"0", "false", "no"}:
+        return False
+    return inject_flag_path().exists()
+
+
+def inject_max_distance() -> float:
+    """Reject retrieved chunks farther than this L2 distance from the prompt.
+
+    Calibrated on a mature nomic-embed-text index: on-topic top hits measured
+    14-16, nonsense prompts ~20. Other embedding models scale differently —
+    recalibrate when changing AGENT_HISTORY_MODEL.
+    """
+    raw = _env("AGENT_HISTORY_INJECT_MAX_DIST", "17.0") or "17.0"
+    try:
+        return float(raw)
+    except ValueError:
+        return 17.0
+
+
 def codex_session_dirs() -> list[Path]:
     """Codex CLI rollout roots: ~/.codex/sessions plus the WSL Windows side."""
     explicit = _env("AGENT_HISTORY_CODEX")
@@ -163,6 +191,14 @@ def hermes_state_dbs() -> list[Path]:
     else:
         homes = sorted(Path.home().glob(".hermes*"))
     return [home / "state.db" for home in homes if (home / "state.db").is_file()]
+
+
+def openclaw_dirs() -> list[Path]:
+    """OpenClaw state roots (~/.openclaw), holding agents/*/sessions JSONL."""
+    explicit = _env("AGENT_HISTORY_OPENCLAW_DIRS")
+    if explicit:
+        return [Path(p).expanduser() for p in explicit.split(os.pathsep) if p.strip()]
+    return [Path.home() / ".openclaw"]
 
 
 def extra_dirs() -> list[Path]:

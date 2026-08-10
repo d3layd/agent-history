@@ -25,8 +25,8 @@ No API keys, no per-query cost, and nothing is sent off-box (the tool refuses a
 non-loopback endpoint unless you explicitly allow it).
 
 It indexes transcripts from **Claude Code**, **OpenAI Codex CLI**,
-**OpenCode**, and **Hermes** — every agent found on the machine, merged into
-one index, searchable together or filtered with `--agent`.
+**OpenCode**, **Hermes**, and **OpenClaw** — every agent found on the machine,
+merged into one index, searchable together or filtered with `--agent`.
 
 Search is **hybrid** by default: vector similarity finds meaning, BM25
 full-text finds the exact identifiers that embeddings are bad at (`os error
@@ -374,6 +374,27 @@ would want a different store. For a personal transcript index the ceiling is
 remote, and in exchange there is no daemon, no server, and no separate process
 to keep alive.
 
+## Context injection (opt-in)
+
+```console
+$ agent-history inject on
+```
+
+With this enabled, a UserPromptSubmit hook embeds each prompt you type
+(locally, via Ollama), retrieves past-session chunks relevant to it, and
+injects them as context — so the agent already knows what you decided three
+weeks ago without being told. No LLM is involved anywhere: the prompt is the
+retrieval query, and the chunks arrive verbatim.
+
+Unsolicited context has to clear a much higher bar than search results you
+asked for, so this is precision-first: an absolute distance cutoff rejects
+weak matches (`AGENT_HISTORY_INJECT_MAX_DIST`, default 17.0 —
+recalibrate if you change embedding model), at most 3 chunks / ~2KB per
+prompt, your current session's own chunks are excluded, trivial prompts and
+slash commands are skipped, and when Ollama is down nothing is injected.
+Every failure path is a silent no-op — the hook can never break a prompt.
+`agent-history inject off` turns it back off.
+
 ## Automatic indexing
 
 The plugin installs two hooks:
@@ -491,7 +512,7 @@ Support for more agents, on the existing adapter interface:
 - [x] OpenAI Codex CLI — JSONL rollouts under `~/.codex/sessions/`
 - [x] OpenCode — SQLite at `~/.local/share/opencode/opencode.db`
 - [x] Hermes — SQLite at `~/.hermes-*/state.db`
-- [ ] OpenClaw
+- [x] OpenClaw — JSONL under `~/.openclaw/agents/*/sessions/`
 
 Adding one means writing a single module in `src/agent_history/adapters/` that
 yields `Record`s. The indexer and search layer don't change. The SQLite-backed

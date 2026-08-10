@@ -9,6 +9,29 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.7.0] — 2026-08-09
+
+### Added
+- **Opt-in context injection** — `agent-history inject on`. A
+  UserPromptSubmit hook embeds each prompt locally, retrieves past-session
+  chunks about it, and hands them to the agent as additional context — the
+  "stop re-explaining the project" feature, with no LLM involved anywhere:
+  the prompt is the query and the chunks are injected verbatim.
+  Precision-first by design: off by default, an absolute distance cutoff
+  (`AGENT_HISTORY_INJECT_MAX_DIST`, default 17.0, calibrated so on-topic
+  hits at 14–16 pass and nonsense at ~20 fails), hard caps (3 chunks /
+  2,200 chars), the current session's own chunks excluded, trivial and
+  slash-command prompts skipped, and nothing injected when Ollama is
+  unreachable — a fast silent no-op is always preferred over noisy context.
+  Every failure path exits 0 so the hook can never break a prompt.
+- **OpenClaw adapter** — JSONL sessions under `~/.openclaw/agents/*/sessions/`
+  (format verified against a live 2026.4.26 install), skipping the
+  `*.trajectory.jsonl` tool-traffic duplicates and heartbeat noise, plus
+  workspace markdown (`SOUL.md`, `MEMORY.md`, the `memory/` tree). Override
+  the root with `AGENT_HISTORY_OPENCLAW_DIRS`. This completes the roadmap's
+  adapter list — and its immediate job: indexing an OpenClaw install's full
+  history *before* a migration to another agent discards it.
+
 ## [0.6.0] — 2026-08-09
 
 ### Added
