@@ -77,10 +77,14 @@ def _run(stream) -> int:
         return 0
     cutoff = config.inject_max_distance()
     session = payload.get("session_id") or ""
+    # Strict mode scopes recall to the current project, so a chunk from
+    # another client/project can never ride into this prompt.
+    project = (payload.get("cwd") or "") if config.strict_enabled() else None
 
     rows = [
         r for r in store.query(db, vector, FETCH)
         if r[7] <= cutoff and r[2] != session
+        and (project is None or r[3] == project)
     ]
     picked = _dedupe(rows)[:MAX_CHUNKS]
     if not picked:
@@ -137,19 +141,30 @@ def _render(rows: list[tuple]) -> str:
 # ------------------------------------------------------------------ toggling
 
 def set_enabled(on: bool) -> int:
-    off_marker = config.inject_off_path()
+    config.ensure_data_home()
+    strict = config.strict_enabled()
+    # Normal mode is default-on (an off-marker disables); strict mode is
+    # default-off (an on-marker enables). Drive whichever marker applies so
+    # `on`/`off`/`toggle` behave correctly in both.
+    if strict:
+        marker, present_means_on = config.inject_on_path(), True
+    else:
+        marker, present_means_on = config.inject_off_path(), False
+    want_marker = on if present_means_on else not on
+    if want_marker:
+        marker.touch()
+        config.secure_file(marker)
+    else:
+        marker.unlink(missing_ok=True)
+
     if on:
-        off_marker.unlink(missing_ok=True)
-        print("inject: on")
+        print("inject: on" + ("  (strict: current project only)" if strict else ""))
         print(f"  cutoff:  distance <= {config.inject_max_distance()} "
               "($AGENT_HISTORY_INJECT_MAX_DIST)")
         print(f"  caps:    {MAX_CHUNKS} chunks, {MAX_TOTAL_CHARS} chars")
         print("  scope:   fires on UserPromptSubmit in sessions with the "
               "history plugin installed")
     else:
-        config.ensure_data_home()
-        off_marker.touch()
-        config.secure_file(off_marker)
         print("inject: off")
     return 0
 
@@ -161,10 +176,16 @@ def toggle() -> int:
 
 def status() -> int:
     on = config.inject_enabled()
-    print(f"inject: {'on' if on else 'off'}  (on by default)")
+    strict = config.strict_enabled()
+    default = "off by default" if strict else "on by default"
+    print(f"inject: {'on' if on else 'off'}  ({default})")
     if on:
         print(f"  cutoff: distance <= {config.inject_max_distance()}")
+        if strict:
+            print("  scope:  current project only (strict mode)")
     print(f"  toggle: agent-history inject {'off' if on else 'on'}"
           "   (or /history:inject in Claude Code)")
-    print("  env:    AGENT_HISTORY_INJECT=1|0 overrides the off-marker")
+    print("  env:    AGENT_HISTORY_INJECT=1|0 overrides the marker")
+    if strict:
+        print("  strict: ON — storage-at-rest controls still apply to the index")
     return 0

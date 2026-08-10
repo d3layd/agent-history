@@ -128,23 +128,54 @@ def claude_projects_dir() -> Path:
     return Path.home() / ".claude/projects"
 
 
+def strict_path() -> Path:
+    """Presence enables strict/compliance mode."""
+    return data_home() / "strict.on"
+
+
+def strict_enabled() -> bool:
+    """Compliance posture for regulated (e.g. CUI) work.
+
+    In strict mode injection defaults OFF and, when explicitly enabled,
+    retrieves only from the current project (same cwd) — closing the
+    cross-project injection path. Storage-at-rest controls still apply;
+    strict mode narrows behaviour, it does not make the index not-sensitive.
+    Set with `AGENT_HISTORY_STRICT=1` or `agent-history strict on`.
+    """
+    env = (_env("AGENT_HISTORY_STRICT", "") or "").strip().lower()
+    if env in {"1", "true", "yes"}:
+        return True
+    if env in {"0", "false", "no"}:
+        return False
+    return strict_path().exists()
+
+
 def inject_off_path() -> Path:
     """Presence disables injection. Absence = on (the default)."""
     return data_home() / "inject.off"
 
 
 def inject_enabled() -> bool:
-    """Context injection is ON by default; disabled by the off-marker or env.
+    """Context injection default: ON normally, OFF under strict mode.
 
-    `AGENT_HISTORY_INJECT=0` (or a written off-marker) opts out;
-    `AGENT_HISTORY_INJECT=1` forces on regardless of the marker.
+    `AGENT_HISTORY_INJECT=1` forces on and `=0` forces off, either way.
+    Otherwise: enabled unless the off-marker exists — and in strict mode the
+    default flips to off (injecting cross-context is exactly what strict
+    mode guards against), so it must be turned on deliberately.
     """
     env = (_env("AGENT_HISTORY_INJECT", "") or "").strip().lower()
     if env in {"1", "true", "yes"}:
         return True
     if env in {"0", "false", "no"}:
         return False
+    if strict_enabled():
+        return inject_on_path().exists()
     return not inject_off_path().exists()
+
+
+def inject_on_path() -> Path:
+    """Presence enables injection under strict mode (default-off there)."""
+    return data_home() / "inject.on"
 
 
 def inject_max_distance() -> float:

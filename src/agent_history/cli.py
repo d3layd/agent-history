@@ -9,7 +9,8 @@ from . import (__version__, adapters, config, embed, index, inject, search,
                show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
-            "datadir", "trigger", "show", "serve", "inject", "docs"}
+            "datadir", "trigger", "show", "serve", "inject", "docs",
+            "purge", "strict"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "reembed",
         help="re-embed every stored chunk with the configured model — "
              "keeps all history, unlike reindex")
+    pur = sub.add_parser(
+        "purge", help="permanently delete indexed chunks (surgical or total)")
+    pur.add_argument("--cwd", help="delete chunks whose directory matches")
+    pur.add_argument("--session", help="delete chunks of one session id")
+    pur.add_argument("--agent", help="delete chunks from one agent")
+    pur.add_argument("--all", action="store_true", dest="everything",
+                     help="delete the entire index (total destruction)")
+    pur.add_argument("--yes", action="store_true",
+                     help="actually delete; without it, only previews the count")
+
+    strict = sub.add_parser(
+        "strict", help="compliance profile: injection off + scoped to project")
+    strict.add_argument("action", nargs="?", default="status",
+                        choices=["on", "off", "status"])
+
     sub.add_parser("sources", help="print the directories that will be scanned")
     sub.add_parser("datadir", help="print the data directory (index, log, lock)")
     sub.add_parser("doctor", help="diagnose the installation")
@@ -174,11 +190,66 @@ def _cmd_docs(action: str, path: str | None) -> int:
     return 0
 
 
+def _cmd_purge(args) -> int:
+    try:
+        db = store.open_for_maintenance()
+    except store.StoreError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        rows = store.purge_targets(
+            db, cwd=args.cwd, session=args.session, agent=args.agent,
+            everything=args.everything)
+    finally:
+        pass
+    if not rows and not (args.cwd or args.session or args.agent or args.everything):
+        print("purge needs a target: --cwd, --session, --agent, or --all",
+              file=sys.stderr)
+        return 1
+
+    target = "the ENTIRE index" if args.everything else "matching chunks"
+    if not args.yes:
+        print(f"would delete {len(rows)} chunk(s) ({target}).")
+        print("this is permanent and cannot be undone. re-run with --yes to do it.")
+        return 0
+    removed = store.purge(db, rows)
+    print(f"purged {removed} chunk(s) — permanently deleted from the index.")
+    return 0
+
+
+def _cmd_strict(action: str) -> int:
+    if action == "status":
+        on = config.strict_enabled()
+        print(f"strict: {'ON' if on else 'off'}")
+        if on:
+            print("  injection: default OFF, and when on, current project only")
+            print("  note: index-at-rest controls still apply — strict narrows"
+                  " behaviour, it does not de-scope the stored data")
+        print(f"  toggle: agent-history strict {'off' if on else 'on'}"
+              "   (or AGENT_HISTORY_STRICT=1)")
+        return 0
+    config.ensure_data_home()
+    marker = config.strict_path()
+    if action == "on":
+        marker.touch()
+        config.secure_file(marker)
+        print("strict: ON — injection now defaults off and scopes to the "
+              "current project.")
+        print("run `agent-history inject on` to enable scoped injection.")
+    else:
+        marker.unlink(missing_ok=True)
+        print("strict: off")
+    return 0
+
+
 def _cmd_doctor() -> int:
     print(f"data home:  {config.data_home()}")
     print(f"index:      {config.db_path()}")
     print(f"ollama:     {config.ollama_url()}")
     print(f"model:      {config.model()}")
+    inj = "on" if config.inject_enabled() else "off"
+    print(f"inject:     {inj}"
+          + ("  (strict: project-scoped)" if config.strict_enabled() else ""))
 
     ok, detail = embed.reachable()
     print(f"ollama up:  {'yes' if ok else 'NO'} ({detail})")
@@ -286,6 +357,10 @@ def main(argv: list[str] | None = None) -> int:
             return inject.status()
         if args.command == "docs":
             return _cmd_docs(args.action, args.path)
+        if args.command == "purge":
+            return _cmd_purge(args)
+        if args.command == "strict":
+            return _cmd_strict(args.action)
     except (store.StoreError, embed.EmbedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

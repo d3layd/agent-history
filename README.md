@@ -52,10 +52,11 @@ search hit belongs to, and `serve` is a local web viewer over the same search
 — both read from the index, which matters because the source transcript
 [often no longer exists](#your-index-outlives-the-transcripts).
 
-**Context injection (opt-in).** Turn it on and relevant past-session excerpts
-ride into your new prompts automatically — the "agent already knows your
-project" experience, with no LLM anywhere in the loop:
-[details below](#context-injection-opt-in).
+**Context injection (on by default).** Relevant past-session excerpts ride
+into your new prompts automatically — the "agent already knows your project"
+experience, with no LLM anywhere in the loop. You see a `📚 N memories
+recalled` line each time; toggle with `/history:inject`:
+[details below](#context-injection-on-by-default).
 
 **An archive that agents don't keep.** Claude Code deletes transcripts after
 30 days by default. The index doesn't. On the machine this was built for, 67%
@@ -87,11 +88,12 @@ $ cd agent-history && ./scripts/install.sh
 /plugin install history@agent-history
 ```
 
-This adds a **`/history:search`** command that runs the search and
-*synthesizes an answer* from the results rather than making you read raw
-JSONL, plus three hooks: SessionEnd and PreCompact keep the index current
-automatically, and UserPromptSubmit stays inert unless you opt into
-[context injection](#context-injection-opt-in).
+This adds **`/history:search`** (runs the search and *synthesizes an answer*
+rather than making you read raw JSONL) and **`/history:inject`** (toggle
+context injection), plus three hooks: SessionEnd and PreCompact keep the
+index current automatically, and UserPromptSubmit powers
+[context injection](#context-injection-on-by-default), which is on by
+default.
 
 The plugin is named `history` rather than `agent-history` purely for
 ergonomics: Claude Code namespaces every plugin component as
@@ -179,10 +181,14 @@ $ agent-history show s1 --around 2026-06-14T22:03  # centred on a timestamp
 $ agent-history serve                       # web viewer at http://127.0.0.1:8127
 
 $ agent-history docs add ~/ops-library      # index a documentation tree
-$ agent-history inject on                   # opt into context injection
+$ agent-history inject off                  # injection is on by default
+$ agent-history inject toggle               # or /history:inject in Claude Code
+$ agent-history strict on                   # compliance profile (see below)
 
 $ agent-history index                       # incremental update (the default)
 $ agent-history reembed                     # switch embedding model, keep everything
+$ agent-history purge --cwd ~/clients/acme  # permanently delete matching chunks
+$ agent-history purge --all --yes           # total destruction
 $ agent-history reindex --force             # wipe and rebuild (destructive)
 $ agent-history sources                     # what will be scanned
 $ agent-history doctor                      # diagnose the installation
@@ -312,15 +318,61 @@ Three commands follow from this, in order of how often you should use them:
   requires `--force` to proceed. There is almost never a reason to: model
   changes have `reembed`.
 
+## Deleting on purpose: `purge`
+
+`reindex --force` is a sledgehammer; `purge` is a scalpel — permanent,
+targeted deletion for when you *want* specific history gone (a client
+offboarding, a contract-end destruction obligation, a project you no longer
+want recalled):
+
+```console
+$ agent-history purge --cwd ~/clients/acme     # preview: counts, deletes nothing
+$ agent-history purge --cwd ~/clients/acme --yes   # actually delete
+$ agent-history purge --session <id>           # one conversation
+$ agent-history purge --agent codex            # one source
+$ agent-history purge --all --yes              # total destruction
+```
+
+`--cwd`, `--session`, and `--agent` are AND-combined; without `--yes` it only
+prints how many chunks *would* go. Deletion removes them from the vector and
+full-text indexes too. One caveat from content-hash dedup: identical text is
+stored once, attributed to its first-indexed source — so a surgical purge
+matches that stored attribution, and `--all` is the only guaranteed-complete
+wipe.
+
+## Regulated work: `strict` mode
+
+Context injection's convenience is a liability when one machine holds more
+than one client's history: a chunk from project A can ride into a prompt for
+project B on semantic similarity alone, and every agent here sends prompts to
+a commercial cloud LLM. For regulated data (CUI and the like), turn on the
+compliance profile:
+
+```console
+$ agent-history strict on        # or AGENT_HISTORY_STRICT=1
+```
+
+In strict mode injection **defaults off**, and when you do enable it
+(`inject on`) recall is **scoped to the current project** — a chunk from
+another directory can never be injected. This closes the cross-project
+egress path.
+
+Strict mode narrows *behaviour*; it does not de-scope the *data*. The index
+still holds verbatim text at rest (see [Privacy and security](#privacy-and-security)),
+so encryption-at-rest, access control, and a destruction plan
+([`purge`](#deleting-on-purpose-purge)) remain your responsibility. For
+genuinely regulated deployments, index on in-boundary hardware — never pull a
+client's data onto an out-of-boundary workstation.
+
 ## Automatic indexing
 
 The plugin installs three hooks:
 
 - **SessionEnd** — index when a session finishes
 - **PreCompact** — index before context is compacted, so nothing is lost
-- **UserPromptSubmit** — inert unless
-  [context injection](#context-injection-opt-in) is switched on; it
-  retrieves, it never indexes
+- **UserPromptSubmit** — powers
+  [context injection](#context-injection-on-by-default) (on by default; it
+  retrieves, it never indexes)
 
 One honest caveat: `SessionEnd` only fires on a *clean* exit. Kill the
 terminal and that session is not indexed until something else triggers a run.
@@ -413,15 +465,15 @@ depends downward, and `cli` is the only module aware of all the others.
 
 ```
         ┌──────────────────────────────────────────────────────────┐
- ENTRY  │  cli.py (~300)  index │ reindex │ reembed │ search │ show│
-        │    serve │ docs │ inject │ sources │ doctor │ trigger    │
+ ENTRY  │  cli.py (~380)  index │ reindex │ reembed │ search │ show│
+        │  serve │ docs │ inject │ strict │ purge │ sources │ doctor│
         └──────┬────────────────────────────┬──────────────────────┘
                │                            │
         ┌──────▼─────────┐  ┌───────────────▼───────────────────────┐
  FLOWS  │ index.py (~250)│  │ search.py (130)   hybrid RRF          │
         │  collect→dedup │  │ show.py (90)      conversation view   │
         │  →refresh docs │  │ viewer.py (252)   loopback web UI     │
-        │  →embed→store  │  │ inject.py (158)   prompt-time recall  │
+        │  →embed→store  │  │ inject.py (191)   prompt-time recall  │
         │  reembed: swap │  │ trigger.py (191)  hook-driven indexing│
         └───┬────────┬───┘  └────┬────────────────────┬─────────────┘
             │        │           │                    │
@@ -431,7 +483,7 @@ depends downward, and `cli` is the only module aware of all the others.
     │ Record ×N │    │           │                    │
     └───────────┘    │           │                    │
                 ┌────▼───────────▼────────────┐ ┌─────▼───────────┐
- OUT            │      store.py (~470)        │ │  embed.py (102) │
+ OUT            │      store.py (~520)        │ │  embed.py (102) │
                 │ schema, dedup, kNN, BM25,   │ │  Ollama client  │
                 │ RRF, the docs delete path   │ └─────┬───────────┘
                 └──────────────┬──────────────┘       │
@@ -439,7 +491,7 @@ depends downward, and `cli` is the only module aware of all the others.
                      SQLite + sqlite-vec + FTS5   HTTP :11434
                                │                      │
         ┌──────────────────────▼──────────────────────▼───────────┐
- BASE   │  config.py (~330) — every path and env var, imports     │
+ BASE   │  config.py (~340) — every path and env var, imports     │
         │  nothing.  textproc.py (32) — chunk + scrub, pure.      │
         └─────────────────────────────────────────────────────────┘
 ```
@@ -528,8 +580,9 @@ is no daemon, no server, and no separate process to keep alive.
 | `AGENT_HISTORY_DOCS_DIRS` | – | Docs trees (prefer `agent-history docs add`) |
 | `AGENT_HISTORY_EXTRA_DIRS` | – | Extra transcript roots, os.pathsep-separated |
 | `AGENT_HISTORY_NO_WSL` | – | Set to `1` to skip Windows-side transcripts |
-| `AGENT_HISTORY_INJECT` | – | `1`/`0` overrides the injection flag file |
+| `AGENT_HISTORY_INJECT` | – | `1`/`0` forces injection on/off (else on by default, off under strict) |
 | `AGENT_HISTORY_INJECT_MAX_DIST` | `17.0` | Injection relevance cutoff (L2 distance) |
+| `AGENT_HISTORY_STRICT` | – | `1` enables the compliance profile (injection off + project-scoped) |
 
 Switching `AGENT_HISTORY_MODEL` calls for **`agent-history reembed`** —
 vectors from different models are not comparable, and the tool detects the
@@ -610,7 +663,7 @@ claude-mem observe sessions, compress them with LLM calls into structured
 memories, and inject summaries. agent-history makes the opposite trade: **the
 original words, kept verbatim, at zero ongoing cost** — no summarization
 pass, no token spend, no lossy compression between you and what was actually
-said. [Context injection](#context-injection-opt-in) shows the trade holds
+said. [Context injection](#context-injection-on-by-default) shows the trade holds
 even for the "agent already knows" experience: retrieval alone gets there.
 
 Deliberately out of scope: AI summarization and knowledge graphs. If you want
@@ -624,7 +677,8 @@ complete. What remains is driven by use:
 
 - [ ] An approximate vector index if a corpus outgrows exhaustive kNN
   (hundreds of thousands of chunks — remote for a personal index)
-- [ ] Richer injection controls (per-project opt-out, result feedback)
+- [ ] Richer injection controls (result feedback; per-project scoping now
+  exists via [`strict` mode](#regulated-work-strict-mode))
 - [ ] Further agents as they appear — one adapter module each
 
 Adding an agent means writing a single module in

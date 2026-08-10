@@ -27,6 +27,22 @@ they have no corresponding tags.
   injection on/off without hand-editing anything. `inject status` shows the
   current state and how to change it.
 
+- **`agent-history purge`** — permanent, surgical deletion, the counterpart
+  `reindex --force` never was. Target with `--cwd`, `--session`, `--agent`
+  (AND-combined) or `--all` for total destruction; prints the count and
+  requires `--yes` to act (previews otherwise). Removes chunks from the
+  vector and full-text indexes too. Fills the media-sanitization gap for
+  contract-end data destruction. (Dedup caveat: identical text is stored
+  once under its first source, so surgical purges match stored attribution;
+  `--all` is the only guaranteed-complete wipe.)
+- **`agent-history strict` — a compliance profile** for regulated (e.g. CUI)
+  work. In strict mode injection defaults **off**, and when explicitly
+  enabled retrieves only from the current project (same cwd) — closing the
+  cross-project injection path where a chunk from one client could ride into
+  a prompt for another. Set via `strict on` or `AGENT_HISTORY_STRICT=1`.
+  (Strict mode narrows behaviour; the index remains sensitive-at-rest and
+  its storage controls still apply.)
+
 ### Fixed
 - **Injection can no longer feed itself.** The indexer refuses to index any
   record that begins with this tool's own recall markers (the local hook's
