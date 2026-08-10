@@ -9,6 +9,48 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.12.0] — 2026-08-10
+
+### Changed
+- **Context injection is now ON by default.** Retrieval-only recall is
+  local, free, and precision-gated, so it earns its place without an opt-in
+  step. Disable per-machine with `agent-history inject off` (writes an
+  off-marker) or `AGENT_HISTORY_INJECT=0`; `=1` forces it on. Existing
+  `inject on` installs are unaffected.
+
+### Added
+- **Visible recall count.** The injection hook now emits a `systemMessage`
+  — `📚 agent-history: N memories recalled · /history:inject to toggle` — so
+  ambient injection is no longer invisible. It is shown to the user only,
+  never added to the model's context.
+- **`/history:inject` command** and `agent-history inject toggle` — flip
+  injection on/off without hand-editing anything. `inject status` shows the
+  current state and how to change it.
+
+- **`agent-history purge`** — permanent, surgical deletion, the counterpart
+  `reindex --force` never was. Target with `--cwd`, `--session`, `--agent`
+  (AND-combined) or `--all` for total destruction; prints the count and
+  requires `--yes` to act (previews otherwise). Removes chunks from the
+  vector and full-text indexes too. Fills the media-sanitization gap for
+  contract-end data destruction. (Dedup caveat: identical text is stored
+  once under its first source, so surgical purges match stored attribution;
+  `--all` is the only guaranteed-complete wipe.)
+- **`agent-history strict` — a compliance profile** for regulated (e.g. CUI)
+  work. In strict mode injection defaults **off**, and when explicitly
+  enabled retrieves only from the current project (same cwd) — closing the
+  cross-project injection path where a chunk from one client could ride into
+  a prompt for another. Set via `strict on` or `AGENT_HISTORY_STRICT=1`.
+  (Strict mode narrows behaviour; the index remains sensitive-at-rest and
+  its storage controls still apply.)
+
+### Fixed
+- **Injection can no longer feed itself.** The indexer refuses to index any
+  record that begins with this tool's own recall markers (the local hook's
+  header or the fleet injectors' `AUTO-RECALLED CONTEXT`), so a persisted
+  injection block can never be re-indexed and re-injected into a
+  memories-about-memories loop. One choke point in the indexer covers every
+  adapter.
+
 ## [0.11.0] — 2026-08-10
 
 ### Added

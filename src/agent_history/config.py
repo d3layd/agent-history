@@ -128,18 +128,68 @@ def claude_projects_dir() -> Path:
     return Path.home() / ".claude/projects"
 
 
-def inject_flag_path() -> Path:
-    return data_home() / "inject.on"
+def strict_path() -> Path:
+    """Presence enables strict/compliance mode."""
+    return data_home() / "strict.on"
 
 
-def inject_enabled() -> bool:
-    """Context injection is opt-in: a flag file, overridable by env."""
+def strict_enabled() -> bool:
+    """Compliance posture for regulated (e.g. CUI) work.
+
+    In strict mode injection defaults OFF and, when explicitly enabled,
+    retrieves only from the current project (same cwd) — closing the
+    cross-project injection path. Storage-at-rest controls still apply;
+    strict mode narrows behaviour, it does not make the index not-sensitive.
+    Set with `AGENT_HISTORY_STRICT=1` or `agent-history strict on`.
+    """
+    env = (_env("AGENT_HISTORY_STRICT", "") or "").strip().lower()
+    if env in {"1", "true", "yes"}:
+        return True
+    if env in {"0", "false", "no"}:
+        return False
+    return strict_path().exists()
+
+
+def inject_off_path() -> Path:
+    """Presence disables injection. Absence = on (the default)."""
+    return data_home() / "inject.off"
+
+
+def inject_env_override() -> bool | None:
+    """The `AGENT_HISTORY_INJECT` override, or None if unset.
+
+    When set it wins over the saved markers — so callers that change markers
+    can tell the user the change won't take effect until the env var is unset.
+    """
     env = (_env("AGENT_HISTORY_INJECT", "") or "").strip().lower()
     if env in {"1", "true", "yes"}:
         return True
     if env in {"0", "false", "no"}:
         return False
-    return inject_flag_path().exists()
+    return None
+
+
+def inject_marker_pref() -> bool:
+    """What the saved markers say, ignoring the env override.
+
+    Normal mode is default-on (off-marker disables); strict mode is
+    default-off (on-marker enables) — injecting cross-context is exactly what
+    strict guards against, so it must be turned on deliberately there.
+    """
+    if strict_enabled():
+        return inject_on_path().exists()
+    return not inject_off_path().exists()
+
+
+def inject_enabled() -> bool:
+    """Effective injection state: env override if set, else the marker."""
+    override = inject_env_override()
+    return override if override is not None else inject_marker_pref()
+
+
+def inject_on_path() -> Path:
+    """Presence enables injection under strict mode (default-off there)."""
+    return data_home() / "inject.on"
 
 
 def inject_max_distance() -> float:

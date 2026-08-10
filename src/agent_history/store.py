@@ -416,6 +416,69 @@ def session_rows(
     ).fetchall()
 
 
+def _delete_rows(db: sqlite3.Connection, rows: list[tuple]) -> int:
+    """Delete (id, text) rows from chunks, vec_chunks, and fts_chunks."""
+    fts = fts_enabled(db)
+    for rowid, text in rows:
+        db.execute("DELETE FROM chunks WHERE id = ?", (rowid,))
+        db.execute("DELETE FROM vec_chunks WHERE rowid = ?", (rowid,))
+        if fts:
+            # External-content FTS5 cannot look up a deleted row's text
+            # itself; the 'delete' command must be handed it.
+            db.execute(
+                "INSERT INTO fts_chunks(fts_chunks, rowid, text) "
+                "VALUES('delete', ?, ?)",
+                (rowid, text),
+            )
+    return len(rows)
+
+
+def purge_targets(
+    db: sqlite3.Connection,
+    *,
+    cwd: str | None = None,
+    session: str | None = None,
+    agent: str | None = None,
+    everything: bool = False,
+) -> list[tuple]:
+    """(id, text) rows a purge would remove — computed before deleting so the
+    caller can preview a count and require confirmation.
+
+    Filters are AND-combined (narrowing). `everything=True` targets all rows.
+
+    Dedup caveat: content-hash dedup stores identical text once, attributed to
+    its first-indexed source. So `cwd`/`session` purges match a chunk by its
+    *stored* attribution; verbatim text that also appeared in another project
+    is purged under whichever source indexed it first. `--all` is the only
+    guaranteed-complete destruction.
+    """
+    if everything:
+        return db.execute("SELECT id, text FROM chunks").fetchall()
+    clauses, params = [], []
+    if cwd:
+        clauses.append("cwd LIKE ?")
+        params.append(f"%{cwd}%")
+    if session:
+        clauses.append("session_id = ?")
+        params.append(session)
+    if agent:
+        clauses.append("agent = ?")
+        params.append(agent)
+    if not clauses:
+        return []
+    return db.execute(
+        f"SELECT id, text FROM chunks WHERE {' AND '.join(clauses)}", params
+    ).fetchall()
+
+
+def purge(db: sqlite3.Connection, rows: list[tuple]) -> int:
+    """Permanently delete the given (id, text) rows. Returns the count."""
+    removed = _delete_rows(db, rows)
+    if removed:
+        db.commit()
+    return removed
+
+
 def remove_stale(
     db: sqlite3.Connection,
     targets: list[tuple[str, str]],
@@ -433,27 +496,15 @@ def remove_stale(
     it.
     """
     removed = 0
-    fts = fts_enabled(db)
     for agent, origin in targets:
         rows = db.execute(
             "SELECT id, content_hash, text FROM chunks "
             "WHERE agent = ? AND origin = ?",
             (agent, origin),
         ).fetchall()
-        for rowid, digest, text in rows:
-            if digest in keep:
-                continue
-            db.execute("DELETE FROM chunks WHERE id = ?", (rowid,))
-            db.execute("DELETE FROM vec_chunks WHERE rowid = ?", (rowid,))
-            if fts:
-                # External-content FTS5 cannot look up the deleted row's
-                # text itself; the 'delete' command must be handed it.
-                db.execute(
-                    "INSERT INTO fts_chunks(fts_chunks, rowid, text) "
-                    "VALUES('delete', ?, ?)",
-                    (rowid, text),
-                )
-            removed += 1
+        doomed = [(rowid, text) for rowid, digest, text in rows
+                  if digest not in keep]
+        removed += _delete_rows(db, doomed)
     if removed:
         db.commit()
     return removed

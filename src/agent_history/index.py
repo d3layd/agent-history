@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import time
 
-from . import adapters, config, embed, store
+from . import adapters, config, embed, store, textproc
 from .textproc import chunk_text
 
 COMMIT_EVERY = 16
@@ -67,6 +67,10 @@ def _pending(
     for adapter in adapters.available_adapters():
         count = 0
         for record in adapter.records():
+            # Never index this tool's own injected recall — re-indexing it
+            # would compound into a memories-about-memories feedback loop.
+            if textproc.is_injection(record.text):
+                continue
             for piece in chunk_text(record.text):
                 digest = hashlib.sha256(piece.encode("utf-8")).hexdigest()
                 produced.add(digest)

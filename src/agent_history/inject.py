@@ -77,20 +77,29 @@ def _run(stream) -> int:
         return 0
     cutoff = config.inject_max_distance()
     session = payload.get("session_id") or ""
+    # Strict mode scopes recall to the current project, so a chunk from
+    # another client/project can never ride into this prompt.
+    project = (payload.get("cwd") or "") if config.strict_enabled() else None
 
     rows = [
         r for r in store.query(db, vector, FETCH)
         if r[7] <= cutoff and r[2] != session
+        and (project is None or r[3] == project)
     ]
     picked = _dedupe(rows)[:MAX_CHUNKS]
     if not picked:
         return 0
 
+    # systemMessage is shown to the user (not the model) — a passive notice
+    # that recall fired, so ambient injection isn't invisible.
+    noun = "memory" if len(picked) == 1 else "memories"
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": _render(picked),
-        }
+        },
+        "systemMessage": (f"\U0001f4da agent-history: {len(picked)} {noun} "
+                          "recalled  ·  /history:inject to toggle"),
     }))
     return 0
 
@@ -132,27 +141,67 @@ def _render(rows: list[tuple]) -> str:
 # ------------------------------------------------------------------ toggling
 
 def set_enabled(on: bool) -> int:
-    flag = config.inject_flag_path()
+    config.ensure_data_home()
+    strict = config.strict_enabled()
+    # Normal mode is default-on (an off-marker disables); strict mode is
+    # default-off (an on-marker enables). Drive whichever marker applies so
+    # `on`/`off`/`toggle` behave correctly in both.
+    if strict:
+        marker, present_means_on = config.inject_on_path(), True
+    else:
+        marker, present_means_on = config.inject_off_path(), False
+    want_marker = on if present_means_on else not on
+    if want_marker:
+        marker.touch()
+        config.secure_file(marker)
+    else:
+        marker.unlink(missing_ok=True)
+
+    override = config.inject_env_override()
+    if override is not None:
+        # The marker preference was saved, but the env var still decides the
+        # effective state — say so rather than print a state that isn't real.
+        actual = "on" if override else "off"
+        print(f"inject preference set to {'on' if on else 'off'} — but "
+              f"AGENT_HISTORY_INJECT is forcing it {actual}.")
+        print(f"  unset AGENT_HISTORY_INJECT for the '{'on' if on else 'off'}' "
+              "preference to take effect.")
+        return 0
+
     if on:
-        config.ensure_data_home()
-        flag.touch()
-        print("inject: on")
+        print("inject: on" + ("  (strict: current project only)" if strict else ""))
         print(f"  cutoff:  distance <= {config.inject_max_distance()} "
               "($AGENT_HISTORY_INJECT_MAX_DIST)")
         print(f"  caps:    {MAX_CHUNKS} chunks, {MAX_TOTAL_CHARS} chars")
         print("  scope:   fires on UserPromptSubmit in sessions with the "
               "history plugin installed")
     else:
-        flag.unlink(missing_ok=True)
         print("inject: off")
     return 0
 
 
+def toggle() -> int:
+    """Flip the saved marker preference — the /history:inject action.
+
+    Flips the *marker*, not the effective state, so an active env override
+    can't make the flip a silent no-op; set_enabled reports if the override
+    is currently masking the change.
+    """
+    return set_enabled(not config.inject_marker_pref())
+
+
 def status() -> int:
     on = config.inject_enabled()
-    print(f"inject: {'on' if on else 'off'}")
+    strict = config.strict_enabled()
+    default = "off by default" if strict else "on by default"
+    print(f"inject: {'on' if on else 'off'}  ({default})")
     if on:
         print(f"  cutoff: distance <= {config.inject_max_distance()}")
-    print(f"  flag:   {config.inject_flag_path()}")
-    print("  env:    AGENT_HISTORY_INJECT=1|0 overrides the flag file")
+        if strict:
+            print("  scope:  current project only (strict mode)")
+    print(f"  toggle: agent-history inject {'off' if on else 'on'}"
+          "   (or /history:inject in Claude Code)")
+    print("  env:    AGENT_HISTORY_INJECT=1|0 overrides the marker")
+    if strict:
+        print("  strict: ON — storage-at-rest controls still apply to the index")
     return 0
