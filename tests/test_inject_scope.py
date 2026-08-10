@@ -66,6 +66,8 @@ def _put(db, text, *, cwd, session):
     db.commit()
 
 
+@pytest.mark.skipif(not store.extensions_supported(),
+                    reason="this Python cannot load SQLite extensions")
 def test_near_exact_other_project_match_still_injects(fake_embed, monkeypatch, capsys):
     monkeypatch.setenv("AGENT_HISTORY_INJECT", "1")
     db, _ = store.open_for_write()
