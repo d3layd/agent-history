@@ -206,6 +206,23 @@ def inject_max_distance() -> float:
         return 17.0
 
 
+def inject_cross_distance() -> float:
+    """Tighter cutoff for chunks OUTSIDE the current directory/project.
+
+    Injection prefers the current directory: same-directory chunks pass
+    `inject_max_distance()`, but a chunk from another project must clear this
+    stricter bar to ride into an unrelated prompt — "near-exact only." On the
+    same nomic-embed-text calibration (on-topic top hits 14-16), the 14.0
+    default admits only strong cross-project matches. Should be <= the main
+    cutoff; recalibrate with the model.
+    """
+    raw = _env("AGENT_HISTORY_INJECT_CROSS_DIST", "14.0") or "14.0"
+    try:
+        return min(float(raw), inject_max_distance())
+    except ValueError:
+        return min(14.0, inject_max_distance())
+
+
 def codex_session_dirs() -> list[Path]:
     """Codex CLI rollout roots: ~/.codex/sessions plus the WSL Windows side."""
     explicit = _env("AGENT_HISTORY_CODEX")

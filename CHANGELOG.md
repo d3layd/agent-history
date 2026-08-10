@@ -9,6 +9,19 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.15.0] — 2026-08-10
+
+### Changed
+- **Injection prefers the current directory, cheaply.** Retrieval now uses a
+  two-tier distance gate keyed on the prompt's working directory: chunks from
+  the current project (the directory or a sub/parent of it) pass the normal
+  cutoff, while chunks from *other* projects must clear a tighter
+  "near-exact" cutoff (`AGENT_HISTORY_INJECT_CROSS_DIST`, default 14.0). So
+  obviously-unrelated other-project matches are dropped up front by simple
+  inference — no model call — while a genuinely strong cross-project match
+  still comes through. `strict` mode continues to hard-scope to the current
+  directory; deliberate `search` is unaffected and stays fully cross-project.
+
 ## [0.14.0] — 2026-08-10
 
 ### Changed
