@@ -15,7 +15,7 @@ index, so you can ask for it by meaning instead of by keyword:
 
 ```console
 $ agent-history search "why did we split the auth middleware"
-#1  dist=12.70  2026-06-14T22:03  claude-code/assistant  ~/repos/example
+#1  score=0.0325  2026-06-14T22:03  claude-code/assistant  ~/repos/example
     file: /home/you/.claude/projects/-home-you-repos-example/a1b2c3.jsonl
     The reason to split it is that the session refresh needs to run before...
 ```
@@ -26,7 +26,11 @@ non-loopback endpoint unless you explicitly allow it).
 
 It indexes transcripts from **Claude Code**, **OpenAI Codex CLI**,
 **OpenCode**, **Hermes**, and **OpenClaw** — every agent found on the machine,
-merged into one index, searchable together or filtered with `--agent`.
+merged into one index, searchable together or filtered with `--agent`. Add
+[documentation trees](#indexing-documentation-trees) and the same search
+spans what was said *and* what was written down; switch on
+[context injection](#context-injection-opt-in) and relevant history rides
+into new prompts by itself.
 
 Search is **hybrid** by default: vector similarity finds meaning, BM25
 full-text finds the exact identifiers that embeddings are bad at (`os error
@@ -127,7 +131,9 @@ an answer* from the results, rather than making you read raw JSONL:
 ```
 
 It also installs SessionEnd and PreCompact hooks that keep the index current
-automatically.
+automatically, and a UserPromptSubmit hook that stays inert unless you opt
+into [context injection](#context-injection-opt-in) with
+`agent-history inject on`.
 
 The plugin is named `history` rather than `agent-history` purely for ergonomics:
 Claude Code namespaces every plugin component as `<plugin>:<component>`, with no
@@ -311,36 +317,38 @@ matter how short the text.
 
 ## Architecture
 
-The whole tool is about 1,200 lines. The dependency graph is acyclic and
+The whole tool is about 2,900 lines. The dependency graph is acyclic and
 shallow — `config` and `textproc` import nothing internal, everything else
 depends downward, and `cli` is the only module aware of all the others.
 
 ```
-        ┌─────────────────────────────────────────────────────────┐
- ENTRY  │  cli.py   index │ reindex │ search │ show │ serve       │
-        │           sources │ doctor │ datadir │ trigger          │
-        └───────┬──────────────────────────────┬──────────────────┘
-                │                              │
-        ┌───────▼────────┐            ┌────────▼────────┐
- FLOWS  │  index.py (99) │            │ search.py (65)  │
-        │  collect→dedup │            │ embed q→kNN     │
-        │  →embed→store  │            │ →filter→print   │
-        └───┬────────┬───┘            └────┬───────┬────┘
-            │        │                     │       │
-    ┌───────▼───┐    │                     │       │
- IN │ adapters/ │    │                     │       │
-    │  (51+148) │    │                     │       │
-    │ Record ×N │    │                     │       │
-    └───────────┘    │                     │       │
-                ┌────▼─────────────────────▼──┐ ┌──▼──────────────┐
- OUT            │      store.py (194)         │ │  embed.py (102) │
-                │  schema, dedup, kNN, meta   │ │  Ollama client  │
-                └──────────────┬──────────────┘ └──────┬──────────┘
-                               │                       │
-                        SQLite + sqlite-vec      HTTP :11434
-                               │                       │
-        ┌──────────────────────▼───────────────────────▼──────────┐
- BASE   │  config.py (166) — every path and env var, imports      │
+        ┌──────────────────────────────────────────────────────────┐
+ ENTRY  │  cli.py (287)  index │ reindex │ search │ show │ serve   │
+        │      docs │ inject │ sources │ doctor │ datadir │ trigger│
+        └──────┬────────────────────────────┬──────────────────────┘
+               │                            │
+        ┌──────▼─────────┐  ┌───────────────▼───────────────────────┐
+ FLOWS  │ index.py (128) │  │ search.py (130)   hybrid RRF          │
+        │  collect→dedup │  │ show.py (90)      conversation view   │
+        │  →refresh docs │  │ viewer.py (252)   loopback web UI     │
+        │  →embed→store  │  │ inject.py (158)   prompt-time recall  │
+        └───┬────────┬───┘  │ trigger.py (191)  hook-driven indexing│
+            │        │      └────┬────────────────────┬─────────────┘
+    ┌───────▼───┐    │           │                    │
+ IN │ adapters/ │    │           │                    │
+    │ 6 sources │    │           │                    │
+    │ Record ×N │    │           │                    │
+    └───────────┘    │           │                    │
+                ┌────▼───────────▼────────────┐ ┌─────▼───────────┐
+ OUT            │      store.py (435)         │ │  embed.py (102) │
+                │ schema, dedup, kNN, BM25,   │ │  Ollama client  │
+                │ RRF, the docs delete path   │ └─────┬───────────┘
+                └──────────────┬──────────────┘       │
+                               │                      │
+                     SQLite + sqlite-vec + FTS5   HTTP :11434
+                               │                      │
+        ┌──────────────────────▼──────────────────────▼───────────┐
+ BASE   │  config.py (300) — every path and env var, imports      │
         │  nothing.  textproc.py (32) — chunk + scrub, pure.      │
         └─────────────────────────────────────────────────────────┘
 ```
@@ -348,8 +356,12 @@ depends downward, and `cli` is the only module aware of all the others.
 **Adapters** are the extensibility seam. One answers three questions —
 `available()`, `roots()`, `records()` — and yields `Record(agent, origin,
 session_id, cwd, timestamp, role, text)`. Nothing downstream knows which agent
-produced a record, which is why `origin` is a string: it holds a file path
-today and `db:<path>#<table>` for the SQLite-backed agents on the roadmap.
+produced a record, which is why `origin` is a string: a file path for the
+JSONL agents (Claude Code, Codex, OpenClaw), `db:<path>#<table>` for the
+SQLite-backed ones (OpenCode, Hermes). Two optional capabilities extend the
+seam: `watch_files()` lets an adapter own its change-detection file set, and
+`mutable = True` opts a source into stale-chunk refresh — docs is the only
+adapter that sets either.
 
 **`config.py`** is the single source of truth for location. No other module
 contains a hardcoded path. It also owns the security posture — `0700` creation,
@@ -429,10 +441,13 @@ Every failure path is a silent no-op — the hook can never break a prompt.
 
 ## Automatic indexing
 
-The plugin installs two hooks:
+The plugin installs three hooks:
 
 - **SessionEnd** — index when a session finishes
 - **PreCompact** — index before context is compacted, so nothing is lost
+- **UserPromptSubmit** — inert unless
+  [context injection](#context-injection-opt-in) is switched on; it
+  retrieves, it never indexes
 
 One honest caveat: `SessionEnd` only fires on a *clean* exit. Kill the terminal
 and that session is not indexed until something else triggers a run. Gaps are
@@ -539,15 +554,19 @@ indexing nothing. Name the one you want with `AGENT_HISTORY_EXTRA_DIRS`.
 
 ## Roadmap
 
-Support for more agents, on the existing adapter interface:
+The original roadmap — adapters for every agent found on this machine — is
+complete: Codex, OpenCode, Hermes, and OpenClaw all shipped in 0.6–0.7,
+followed by hybrid search, the viewer, context injection, docs trees, and
+refresh-on-change. What remains is driven by use:
 
-- [x] OpenAI Codex CLI — JSONL rollouts under `~/.codex/sessions/`
-- [x] OpenCode — SQLite at `~/.local/share/opencode/opencode.db`
-- [x] Hermes — SQLite at `~/.hermes-*/state.db`
-- [x] OpenClaw — JSONL under `~/.openclaw/agents/*/sessions/`
+- [ ] An approximate vector index if a corpus outgrows exhaustive kNN
+  (hundreds of thousands of chunks — remote for a personal index)
+- [ ] Richer injection controls (per-project opt-out, result feedback)
+- [ ] Further agents as they appear — one adapter module each
 
-Adding one means writing a single module in `src/agent_history/adapters/` that
-yields `Record`s. The indexer and search layer don't change. The SQLite-backed
+Adding an agent means writing a single module in
+`src/agent_history/adapters/` that yields `Record`s. The indexer and search
+layer don't change. The SQLite-backed
 adapters open their source read-only and select named columns only — agent
 databases keep OAuth tokens and system prompts in neighbouring tables and
 columns, and `SELECT *` is how those would end up in a search index.
