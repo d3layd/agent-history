@@ -15,6 +15,9 @@ import pytest
 _LEAKY = [
     "AGENT_HISTORY_HOME",
     "AGENT_HISTORY_PROJECTS",
+    "AGENT_HISTORY_CODEX",
+    "AGENT_HISTORY_OPENCODE_DB",
+    "AGENT_HISTORY_HERMES_DIRS",
     "AGENT_HISTORY_EXTRA_DIRS",
     "AGENT_HISTORY_MODEL",
     "AGENT_HISTORY_NO_WSL",
@@ -35,6 +38,12 @@ def isolated_env(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AGENT_HISTORY_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("AGENT_HISTORY_PROJECTS", str(tmp_path / "projects"))
+    # Pin every adapter inside tmp_path so a developer's real transcripts
+    # never leak into a test run.
+    monkeypatch.setenv("AGENT_HISTORY_CODEX", str(tmp_path / "codex"))
+    monkeypatch.setenv("AGENT_HISTORY_OPENCODE_DB",
+                       str(tmp_path / "opencode/opencode.db"))
+    monkeypatch.setenv("AGENT_HISTORY_HERMES_DIRS", str(tmp_path / "hermes"))
     # WSL detection reads a real absolute path; keep it out of unit tests.
     monkeypatch.setenv("AGENT_HISTORY_NO_WSL", "1")
     (tmp_path / "projects").mkdir()

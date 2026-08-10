@@ -14,6 +14,8 @@ The user's goal is almost always **reconstructing project context on demand** �
 5. Cite the source file + timestamp for each claim so they can dig in if they want.
 6. If the top chunks look like surface references rather than the full context, offer to read the surrounding lines from the source file.
 
-Useful flags: `-k N` for more results, `--full` for complete chunk text, `--cwd PATTERN` to scope to a project, `--agent NAME` to scope to one agent.
+Useful flags: `-k N` for more results, `--full` for complete chunk text, `--cwd PATTERN` to scope to a project, `--agent NAME` to scope to one agent (claude-code, codex, opencode, hermes), `--mode text` for exact-identifier lookups (error codes, function names — also works when Ollama is down).
+
+To read the conversation around a promising hit, run `agent-history show <session_id-or-file>` (optionally `--around <timestamp>` from the hit) instead of parsing the raw transcript yourself — it works even when the source file was deleted.
 
 If the tool reports the index is empty, offer to run `agent-history index` first. If it reports a problem, `agent-history doctor` diagnoses it.

@@ -9,7 +9,35 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
-## [0.5.0] — 2026-08-07
+## [0.6.0] — 2026-08-09
+
+### Added
+- **Three new agents.** Adapters for OpenAI Codex CLI (JSONL rollouts under
+  `~/.codex/sessions/`, including the WSL Windows side), OpenCode (SQLite at
+  `~/.local/share/opencode/opencode.db`), and Hermes (SQLite at
+  `~/.hermes*/state.db`, one per profile). The SQLite adapters open their
+  sources read-only and select named columns only — the same databases hold
+  OAuth tokens and system prompts, which must never reach the index. Override
+  locations with `AGENT_HISTORY_CODEX`, `AGENT_HISTORY_OPENCODE_DB`, and
+  `AGENT_HISTORY_HERMES_DIRS`.
+- **Hybrid search.** An FTS5 index now sits alongside the vectors, and
+  `search` fuses BM25 and vector rankings (reciprocal rank fusion) by
+  default. Exact identifiers — error codes, function names — that embed
+  poorly now rank properly. `--mode vector` restores the old behaviour;
+  `--mode text` needs no Ollama at all, and hybrid degrades to it with a
+  note when the embedding endpoint is down. An existing index gains the
+  FTS table automatically on its next write.
+- `agent-history show <session-or-origin>` — prints the conversation a
+  search hit belongs to, read from the index rather than the source
+  transcript (which frequently no longer exists). `--around <timestamp>`
+  centres the window on the hit.
+- `agent-history serve` — a local web viewer over the same search, standard
+  library only, bound strictly to 127.0.0.1 with no flag to change it.
+
+### Fixed
+- `trigger --if-changed` only stat-ed `*.jsonl` and `*.md` files, so it
+  could never notice a change in a database-backed source. File roots (and
+  their `-wal` sidecars) are now checked directly.
 
 ### Added
 - **Windows support.** CI now covers Python 3.10–3.13 on Windows alongside

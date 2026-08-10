@@ -5,10 +5,11 @@ import argparse
 import datetime
 import sys
 
-from . import __version__, adapters, config, embed, index, search, store, trigger
+from . import (__version__, adapters, config, embed, index, search, show,
+               store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "search", "sources", "doctor", "datadir",
-            "trigger"}
+            "trigger", "show", "serve"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,8 +42,24 @@ def _build_parser() -> argparse.ArgumentParser:
     find.add_argument("-k", type=int, default=8, help="results to return (default 8)")
     find.add_argument("--cwd", help="filter by substring of the session's directory")
     find.add_argument("--agent", help="filter by agent, e.g. claude-code")
+    find.add_argument("--mode", choices=search.MODES, default="hybrid",
+                      help="hybrid (default), vector, or text (no Ollama needed)")
     find.add_argument("--full", action="store_true", help="print full chunk text")
     find.add_argument("--json", action="store_true", dest="as_json")
+
+    ctx = sub.add_parser(
+        "show", help="print the conversation a search hit belongs to")
+    ctx.add_argument("target",
+                     help="an origin path or session id, as printed by search")
+    ctx.add_argument("--around", metavar="TIMESTAMP",
+                     help="centre the window on this timestamp instead of the end")
+    ctx.add_argument("--limit", type=int, default=40,
+                     help="chunks to print (default 40)")
+    ctx.add_argument("--json", action="store_true", dest="as_json")
+
+    serve = sub.add_parser(
+        "serve", help="local web viewer on 127.0.0.1 (loopback only)")
+    serve.add_argument("--port", type=int, default=viewer.DEFAULT_PORT)
     return parser
 
 
@@ -145,9 +162,15 @@ def main(argv: list[str] | None = None) -> int:
                 k=args.k,
                 cwd=args.cwd,
                 agent=args.agent,
+                mode=args.mode,
                 full=args.full,
                 as_json=args.as_json,
             )
+        if args.command == "show":
+            return show.run(args.target, around=args.around,
+                            limit=args.limit, as_json=args.as_json)
+        if args.command == "serve":
+            return viewer.run(port=args.port)
     except (store.StoreError, embed.EmbedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

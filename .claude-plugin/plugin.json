@@ -1,8 +1,8 @@
 {
   "name": "history",
   "displayName": "Agent History",
-  "version": "0.5.0",
-  "description": "Semantic search over your past Claude Code sessions, using local Ollama embeddings",
+  "version": "0.6.0",
+  "description": "Semantic search over your past AI coding agent sessions, using local Ollama embeddings",
   "author": {
     "name": "Dennis Layden",
     "email": "github@dennislayden.com",

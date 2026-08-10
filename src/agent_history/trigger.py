@@ -112,6 +112,16 @@ def _anything_changed(stamp: Path) -> bool:
 
     for adapter in adapters.available_adapters():
         for root in adapter.roots():
+            # Database-backed adapters return the file itself. SQLite in WAL
+            # mode writes the -wal first, so check the sidecars too.
+            if root.is_file():
+                for candidate in (root, Path(str(root) + "-wal")):
+                    try:
+                        if candidate.stat().st_mtime > since:
+                            return True
+                    except OSError:
+                        continue
+                continue
             for pattern in ("*.jsonl", "*.md"):
                 for path in root.rglob(pattern):
                     try:

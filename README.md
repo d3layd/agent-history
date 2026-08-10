@@ -24,6 +24,15 @@ Everything runs on your machine — embeddings come from your own Ollama instanc
 No API keys, no per-query cost, and nothing is sent off-box (the tool refuses a
 non-loopback endpoint unless you explicitly allow it).
 
+It indexes transcripts from **Claude Code**, **OpenAI Codex CLI**,
+**OpenCode**, and **Hermes** — every agent found on the machine, merged into
+one index, searchable together or filtered with `--agent`.
+
+Search is **hybrid** by default: vector similarity finds meaning, BM25
+full-text finds the exact identifiers that embeddings are bad at (`os error
+11001`, a function name), and the two rankings are fused. `--mode text` works
+with no Ollama running at all.
+
 ## Requirements
 
 - **Python 3.10+**, with a `sqlite3` module that permits extension loading (see
@@ -131,14 +140,26 @@ $ agent-history search "query"              # top 8 matches
 $ agent-history search "query" -k 20        # more results
 $ agent-history search "query" --full       # full chunk text, not a preview
 $ agent-history search "query" --cwd myapp  # only sessions from a directory
+$ agent-history search "query" --agent codex   # one agent's sessions only
+$ agent-history search "query" --mode text  # exact match, no Ollama needed
 $ agent-history search "query" --json       # machine-readable
 $ agent-history "query"                     # `search` is the default
 
+$ agent-history show <session-or-origin>    # the conversation around a hit
+$ agent-history show s1 --around 2026-06-14T22:03  # centred on a timestamp
+
+$ agent-history serve      # local web viewer at http://127.0.0.1:8127
 $ agent-history index      # incremental update
 $ agent-history reindex    # wipe and rebuild
 $ agent-history sources    # show which directories are scanned
 $ agent-history doctor     # diagnose the installation
 ```
+
+A search hit is a chunk; `show` prints the conversation it came from, read
+from the index rather than the source transcript — which is the point, because
+the transcript often no longer exists (see below). The viewer serves the same
+search and conversation views in a browser, binds strictly to loopback, and
+has no flag to change that.
 
 Start with `doctor` if anything misbehaves — it reports whether Ollama is
 reachable, whether the model is pulled, what was detected, and how much is
@@ -263,8 +284,8 @@ depends downward, and `cli` is the only module aware of all the others.
 
 ```
         ┌─────────────────────────────────────────────────────────┐
- ENTRY  │  cli.py (140)   index │ reindex │ search │ sources      │
-        │                 doctor │ datadir                        │
+ ENTRY  │  cli.py   index │ reindex │ search │ show │ serve       │
+        │           sources │ doctor │ datadir │ trigger          │
         └───────┬──────────────────────────────┬──────────────────┘
                 │                              │
         ┌───────▼────────┐            ┌────────▼────────┐
@@ -309,6 +330,7 @@ the loopback policy, WSL profile disambiguation.
 chunks(id, agent, origin, session_id, cwd, timestamp, role, text,
        content_hash UNIQUE)
 vec_chunks USING vec0(embedding float[768])   -- rowid ⟷ chunks.id
+fts_chunks USING fts5(text, content='chunks') -- BM25, external content
 meta(key, value)                              -- model, dimension
 ```
 
@@ -327,7 +349,10 @@ Three decisions carry most of the weight:
 A common misreading is that Ollama performs the search. It does not — it never
 sees the index. Ollama converts text to vectors, and that is all: once per chunk
 at index time, once per query at search time. The nearest-neighbour search runs
-inside SQLite, in-process, with no network involved.
+inside SQLite, in-process, with no network involved — and so does the BM25
+full-text half of a hybrid query, via FTS5. That is why `--mode text` keeps
+working when Ollama is down, and why hybrid search degrades to it rather than
+failing.
 
 | | |
 |---|---|
@@ -462,19 +487,26 @@ indexing nothing. Name the one you want with `AGENT_HISTORY_EXTRA_DIRS`.
 
 Support for more agents, on the existing adapter interface:
 
-- [ ] OpenAI Codex CLI — JSONL rollouts under `~/.codex/sessions/`
-- [ ] OpenCode — SQLite at `~/.local/share/opencode/opencode.db`
-- [ ] Hermes — SQLite at `~/.hermes-*/state.db`
+- [x] OpenAI Codex CLI — JSONL rollouts under `~/.codex/sessions/`
+- [x] OpenCode — SQLite at `~/.local/share/opencode/opencode.db`
+- [x] Hermes — SQLite at `~/.hermes-*/state.db`
 - [ ] OpenClaw
 
 Adding one means writing a single module in `src/agent_history/adapters/` that
-yields `Record`s. The indexer and search layer don't change.
+yields `Record`s. The indexer and search layer don't change. The SQLite-backed
+adapters open their source read-only and select named columns only — agent
+databases keep OAuth tokens and system prompts in neighbouring tables and
+columns, and `SELECT *` is how those would end up in a search index.
+
+Deliberately out of scope: AI summarization, auto-injection into new sessions,
+and knowledge graphs. Tools like claude-mem do that well; this tool's value is
+the opposite trade — the original words, kept verbatim, at zero ongoing cost.
 
 ## Development
 
 ```console
 $ uv sync --group dev
-$ uv run pytest                 # 67 tests, no Ollama required
+$ uv run pytest                 # no Ollama required
 ```
 
 The embedder is stubbed in tests, so the suite is fast and hermetic — it never

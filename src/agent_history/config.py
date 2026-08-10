@@ -128,6 +128,40 @@ def claude_projects_dir() -> Path:
     return Path.home() / ".claude/projects"
 
 
+def codex_session_dirs() -> list[Path]:
+    """Codex CLI rollout roots: ~/.codex/sessions plus the WSL Windows side."""
+    explicit = _env("AGENT_HISTORY_CODEX")
+    if explicit:
+        return [Path(explicit).expanduser()]
+    dirs = [Path.home() / ".codex/sessions"]
+    dirs += [home / ".codex/sessions" for home in wsl_windows_homes()]
+    return dirs
+
+
+def opencode_db_paths() -> list[Path]:
+    """OpenCode stores everything in one SQLite file under its data dir."""
+    explicit = _env("AGENT_HISTORY_OPENCODE_DB")
+    if explicit:
+        return [Path(explicit).expanduser()]
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local/share"
+    return [base / "opencode/opencode.db"]
+
+
+def hermes_state_dbs() -> list[Path]:
+    """Hermes keeps one state.db per profile (~/.hermes, ~/.hermes-<profile>).
+
+    Its sessions/ directories hold only a gateway routing index — the
+    transcripts live exclusively in these SQLite files.
+    """
+    explicit = _env("AGENT_HISTORY_HERMES_DIRS")
+    if explicit:
+        homes = [Path(p).expanduser() for p in explicit.split(os.pathsep) if p.strip()]
+    else:
+        homes = sorted(Path.home().glob(".hermes*"))
+    return [home / "state.db" for home in homes if (home / "state.db").is_file()]
+
+
 def extra_dirs() -> list[Path]:
     """Additional transcript roots.
 
