@@ -73,9 +73,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     inj = sub.add_parser(
         "inject",
-        help="opt-in: auto-inject relevant past context into new prompts")
+        help="auto-inject relevant past context into new prompts (on by default)")
     inj.add_argument("action", nargs="?", default="status",
-                     choices=["on", "off", "status", "run"],
+                     choices=["on", "off", "toggle", "status", "run"],
                      help="'run' is the hook entry point and reads stdin")
 
     doc = sub.add_parser(
@@ -279,6 +279,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inject":
             if args.action == "run":
                 return inject.run_hook()
+            if args.action == "toggle":
+                return inject.toggle()
             if args.action in ("on", "off"):
                 return inject.set_enabled(args.action == "on")
             return inject.status()

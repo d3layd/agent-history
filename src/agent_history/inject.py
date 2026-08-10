@@ -86,11 +86,16 @@ def _run(stream) -> int:
     if not picked:
         return 0
 
+    # systemMessage is shown to the user (not the model) — a passive notice
+    # that recall fired, so ambient injection isn't invisible.
+    noun = "memory" if len(picked) == 1 else "memories"
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": _render(picked),
-        }
+        },
+        "systemMessage": (f"\U0001f4da agent-history: {len(picked)} {noun} "
+                          "recalled  ·  /history:inject to toggle"),
     }))
     return 0
 
@@ -132,10 +137,9 @@ def _render(rows: list[tuple]) -> str:
 # ------------------------------------------------------------------ toggling
 
 def set_enabled(on: bool) -> int:
-    flag = config.inject_flag_path()
+    off_marker = config.inject_off_path()
     if on:
-        config.ensure_data_home()
-        flag.touch()
+        off_marker.unlink(missing_ok=True)
         print("inject: on")
         print(f"  cutoff:  distance <= {config.inject_max_distance()} "
               "($AGENT_HISTORY_INJECT_MAX_DIST)")
@@ -143,16 +147,24 @@ def set_enabled(on: bool) -> int:
         print("  scope:   fires on UserPromptSubmit in sessions with the "
               "history plugin installed")
     else:
-        flag.unlink(missing_ok=True)
+        config.ensure_data_home()
+        off_marker.touch()
+        config.secure_file(off_marker)
         print("inject: off")
     return 0
 
 
+def toggle() -> int:
+    """Flip the current state — the action behind the /history:inject command."""
+    return set_enabled(not config.inject_enabled())
+
+
 def status() -> int:
     on = config.inject_enabled()
-    print(f"inject: {'on' if on else 'off'}")
+    print(f"inject: {'on' if on else 'off'}  (on by default)")
     if on:
         print(f"  cutoff: distance <= {config.inject_max_distance()}")
-    print(f"  flag:   {config.inject_flag_path()}")
-    print("  env:    AGENT_HISTORY_INJECT=1|0 overrides the flag file")
+    print(f"  toggle: agent-history inject {'off' if on else 'on'}"
+          "   (or /history:inject in Claude Code)")
+    print("  env:    AGENT_HISTORY_INJECT=1|0 overrides the off-marker")
     return 0

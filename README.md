@@ -197,19 +197,22 @@ chronologically instead — useful for "what's the latest on X". Start
 with `doctor` if anything misbehaves — it reports whether Ollama is reachable,
 what was detected, how much is indexed, and flags misconfigured docs roots.
 
-## Context injection (opt-in)
+## Context injection (on by default)
 
-```console
-$ agent-history inject on
-```
+A UserPromptSubmit hook embeds each prompt you type (locally, via Ollama),
+retrieves past-session chunks relevant to it, and injects them as context —
+so the agent already knows what you decided three weeks ago without being
+told. **No LLM is involved anywhere**: the prompt is the retrieval query, and
+the chunks arrive verbatim. Tools like claude-mem buy this experience with
+LLM compression passes; retrieval alone turns out to be enough, at zero token
+cost and with the original wording intact.
 
-With this enabled, a UserPromptSubmit hook embeds each prompt you type
-(locally, via Ollama), retrieves past-session chunks relevant to it, and
-injects them as context — so the agent already knows what you decided three
-weeks ago without being told. **No LLM is involved anywhere**: the prompt is
-the retrieval query, and the chunks arrive verbatim. Tools like claude-mem
-buy this experience with LLM compression passes; retrieval alone turns out to
-be enough, at zero token cost and with the original wording intact.
+Because it's local, free, and precision-gated, it's **on by default**. Each
+time it fires you see a one-line notice — `📚 agent-history: N memories
+recalled · /history:inject to toggle` — shown only to you, never added to the
+model's context. Toggle it with **`/history:inject`** in Claude Code, or
+`agent-history inject off` / `on` / `toggle` (and `AGENT_HISTORY_INJECT=0`
+force-disables).
 
 Unsolicited context has to clear a much higher bar than search results you
 asked for, so this is precision-first:
@@ -223,8 +226,9 @@ asked for, so this is precision-first:
 - When Ollama is down, nothing is injected. Every failure path is a silent
   no-op — the hook can never break a prompt.
 
-`agent-history inject off` turns it back off; `inject status` shows the
-current state.
+Injected recall is never itself re-indexed — the indexer refuses any record
+that begins with the injection markers — so recalled memories can't compound
+into a memories-about-memories loop.
 
 ## Indexing documentation trees
 

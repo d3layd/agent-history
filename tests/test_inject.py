@@ -50,7 +50,16 @@ def enable(monkeypatch):
     monkeypatch.setenv("AGENT_HISTORY_INJECT", "1")
 
 
-def test_disabled_by_default_produces_nothing(indexed, capsys):
+def test_enabled_by_default(indexed, capsys):
+    """No flag, no env — injection fires because on is the default now."""
+    _code, out = hook("we split the auth middleware because session refresh runs first", capsys)
+    assert out != ""
+    assert "systemMessage" in json.loads(out)
+
+
+def test_off_marker_disables(indexed, capsys):
+    config.ensure_data_home()
+    config.inject_off_path().touch()
     code, out = hook("we split the auth middleware because session refresh runs first", capsys)
     assert (code, out) == (0, "")
 
@@ -60,22 +69,36 @@ def test_enabled_injects_a_matching_chunk(indexed, capsys, monkeypatch):
     # fake_embed is deterministic, so identical text embeds at distance ~0.
     code, out = hook("we split the auth middleware because session refresh runs first", capsys)
     assert code == 0
-    body = json.loads(out)["hookSpecificOutput"]
+    payload = json.loads(out)
+    body = payload["hookSpecificOutput"]
     assert body["hookEventName"] == "UserPromptSubmit"
     assert "auth middleware" in body["additionalContext"]
     assert "session=old-session" in body["additionalContext"]
+    # user-visible count line, separate from the model-facing context
+    assert "systemMessage" in payload
+    assert "1 memory recalled" in payload["systemMessage"]
+    assert "auth middleware" not in payload["systemMessage"]
 
 
-def test_flag_file_enables_without_env(indexed, capsys):
+def test_system_message_pluralizes(fake_embed, capsys, monkeypatch):
+    enable(monkeypatch)
+    db, _ = store.open_for_write()
+    for i in range(3):
+        put(db, f"distinct indexed conversation number {i} about the auth project")
+    _code, out = hook("tell me about the auth project conversations", capsys)
+    msg = json.loads(out)["systemMessage"]
+    assert "memories recalled" in msg  # plural for >1
+
+
+def test_env_one_overrides_off_marker(indexed, capsys, monkeypatch):
     config.ensure_data_home()
-    config.inject_flag_path().touch()
+    config.inject_off_path().touch()          # disabled via marker
+    monkeypatch.setenv("AGENT_HISTORY_INJECT", "1")  # ...but env forces on
     _code, out = hook("we split the auth middleware because session refresh runs first", capsys)
     assert out != ""
 
 
-def test_env_zero_overrides_flag_file(indexed, capsys, monkeypatch):
-    config.ensure_data_home()
-    config.inject_flag_path().touch()
+def test_env_zero_overrides_default_on(indexed, capsys, monkeypatch):
     monkeypatch.setenv("AGENT_HISTORY_INJECT", "0")
     _code, out = hook("we split the auth middleware because session refresh runs first", capsys)
     assert out == ""
@@ -157,4 +180,13 @@ def test_toggle_round_trip(fake_embed, capsys):
     assert inject.status() == 0
     assert inject.set_enabled(False) == 0
     assert not config.inject_enabled()
+    capsys.readouterr()
+
+
+def test_toggle_flips_state(fake_embed, capsys):
+    assert config.inject_enabled()          # default on
+    assert inject.toggle() == 0             # -> off
+    assert not config.inject_enabled()
+    assert inject.toggle() == 0             # -> on
+    assert config.inject_enabled()
     capsys.readouterr()

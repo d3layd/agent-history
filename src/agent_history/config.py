@@ -128,18 +128,23 @@ def claude_projects_dir() -> Path:
     return Path.home() / ".claude/projects"
 
 
-def inject_flag_path() -> Path:
-    return data_home() / "inject.on"
+def inject_off_path() -> Path:
+    """Presence disables injection. Absence = on (the default)."""
+    return data_home() / "inject.off"
 
 
 def inject_enabled() -> bool:
-    """Context injection is opt-in: a flag file, overridable by env."""
+    """Context injection is ON by default; disabled by the off-marker or env.
+
+    `AGENT_HISTORY_INJECT=0` (or a written off-marker) opts out;
+    `AGENT_HISTORY_INJECT=1` forces on regardless of the marker.
+    """
     env = (_env("AGENT_HISTORY_INJECT", "") or "").strip().lower()
     if env in {"1", "true", "yes"}:
         return True
     if env in {"0", "false", "no"}:
         return False
-    return inject_flag_path().exists()
+    return not inject_off_path().exists()
 
 
 def inject_max_distance() -> float:

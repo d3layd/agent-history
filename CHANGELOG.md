@@ -9,6 +9,32 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.12.0] — 2026-08-10
+
+### Changed
+- **Context injection is now ON by default.** Retrieval-only recall is
+  local, free, and precision-gated, so it earns its place without an opt-in
+  step. Disable per-machine with `agent-history inject off` (writes an
+  off-marker) or `AGENT_HISTORY_INJECT=0`; `=1` forces it on. Existing
+  `inject on` installs are unaffected.
+
+### Added
+- **Visible recall count.** The injection hook now emits a `systemMessage`
+  — `📚 agent-history: N memories recalled · /history:inject to toggle` — so
+  ambient injection is no longer invisible. It is shown to the user only,
+  never added to the model's context.
+- **`/history:inject` command** and `agent-history inject toggle` — flip
+  injection on/off without hand-editing anything. `inject status` shows the
+  current state and how to change it.
+
+### Fixed
+- **Injection can no longer feed itself.** The indexer refuses to index any
+  record that begins with this tool's own recall markers (the local hook's
+  header or the fleet injectors' `AUTO-RECALLED CONTEXT`), so a persisted
+  injection block can never be re-indexed and re-injected into a
+  memories-about-memories loop. One choke point in the indexer covers every
+  adapter.
+
 ## [0.11.0] — 2026-08-10
 
 ### Added
