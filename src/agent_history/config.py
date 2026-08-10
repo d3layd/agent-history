@@ -193,6 +193,14 @@ def hermes_state_dbs() -> list[Path]:
     return [home / "state.db" for home in homes if (home / "state.db").is_file()]
 
 
+def openclaw_dirs() -> list[Path]:
+    """OpenClaw state roots (~/.openclaw), holding agents/*/sessions JSONL."""
+    explicit = _env("AGENT_HISTORY_OPENCLAW_DIRS")
+    if explicit:
+        return [Path(p).expanduser() for p in explicit.split(os.pathsep) if p.strip()]
+    return [Path.home() / ".openclaw"]
+
+
 def extra_dirs() -> list[Path]:
     """Additional transcript roots.
 

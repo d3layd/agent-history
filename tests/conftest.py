@@ -18,6 +18,7 @@ _LEAKY = [
     "AGENT_HISTORY_CODEX",
     "AGENT_HISTORY_OPENCODE_DB",
     "AGENT_HISTORY_HERMES_DIRS",
+    "AGENT_HISTORY_OPENCLAW_DIRS",
     "AGENT_HISTORY_EXTRA_DIRS",
     "AGENT_HISTORY_MODEL",
     "AGENT_HISTORY_NO_WSL",
@@ -46,6 +47,7 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_HISTORY_OPENCODE_DB",
                        str(tmp_path / "opencode/opencode.db"))
     monkeypatch.setenv("AGENT_HISTORY_HERMES_DIRS", str(tmp_path / "hermes"))
+    monkeypatch.setenv("AGENT_HISTORY_OPENCLAW_DIRS", str(tmp_path / "openclaw"))
     # WSL detection reads a real absolute path; keep it out of unit tests.
     monkeypatch.setenv("AGENT_HISTORY_NO_WSL", "1")
     (tmp_path / "projects").mkdir()

@@ -25,8 +25,8 @@ No API keys, no per-query cost, and nothing is sent off-box (the tool refuses a
 non-loopback endpoint unless you explicitly allow it).
 
 It indexes transcripts from **Claude Code**, **OpenAI Codex CLI**,
-**OpenCode**, and **Hermes** — every agent found on the machine, merged into
-one index, searchable together or filtered with `--agent`.
+**OpenCode**, **Hermes**, and **OpenClaw** — every agent found on the machine,
+merged into one index, searchable together or filtered with `--agent`.
 
 Search is **hybrid** by default: vector similarity finds meaning, BM25
 full-text finds the exact identifiers that embeddings are bad at (`os error
@@ -512,7 +512,7 @@ Support for more agents, on the existing adapter interface:
 - [x] OpenAI Codex CLI — JSONL rollouts under `~/.codex/sessions/`
 - [x] OpenCode — SQLite at `~/.local/share/opencode/opencode.db`
 - [x] Hermes — SQLite at `~/.hermes-*/state.db`
-- [ ] OpenClaw
+- [x] OpenClaw — JSONL under `~/.openclaw/agents/*/sessions/`
 
 Adding one means writing a single module in `src/agent_history/adapters/` that
 yields `Record`s. The indexer and search layer don't change. The SQLite-backed

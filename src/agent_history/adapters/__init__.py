@@ -45,9 +45,16 @@ def all_adapters() -> list[Adapter]:
     from .claude_code import ClaudeCodeAdapter
     from .codex import CodexAdapter
     from .hermes import HermesAdapter
+    from .openclaw import OpenClawAdapter
     from .opencode import OpenCodeAdapter
 
-    return [ClaudeCodeAdapter(), CodexAdapter(), OpenCodeAdapter(), HermesAdapter()]
+    return [
+        ClaudeCodeAdapter(),
+        CodexAdapter(),
+        OpenCodeAdapter(),
+        HermesAdapter(),
+        OpenClawAdapter(),
+    ]
 
 
 def available_adapters() -> list[Adapter]:
