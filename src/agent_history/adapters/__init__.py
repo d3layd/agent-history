@@ -43,8 +43,11 @@ class Adapter(Protocol):
 
 def all_adapters() -> list[Adapter]:
     from .claude_code import ClaudeCodeAdapter
+    from .codex import CodexAdapter
+    from .hermes import HermesAdapter
+    from .opencode import OpenCodeAdapter
 
-    return [ClaudeCodeAdapter()]
+    return [ClaudeCodeAdapter(), CodexAdapter(), OpenCodeAdapter(), HermesAdapter()]
 
 
 def available_adapters() -> list[Adapter]:

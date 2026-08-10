@@ -41,7 +41,9 @@ def run(reindex: bool = False) -> int:
     active = adapters.available_adapters()
     if not active:
         print("No agent transcripts found on this machine.", file=sys.stderr)
-        print("Checked: ~/.claude/projects (override with $AGENT_HISTORY_PROJECTS)",
+        print("Checked: ~/.claude/projects, ~/.codex/sessions, "
+              "~/.local/share/opencode, ~/.hermes*/state.db "
+              "(override with $AGENT_HISTORY_PROJECTS and friends)",
               file=sys.stderr)
         return 1
     print(f"Adapters: {', '.join(a.name for a in active)}")

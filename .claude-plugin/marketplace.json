@@ -9,7 +9,7 @@
     {
       "name": "history",
       "source": "./",
-      "description": "Semantic search over your past Claude Code sessions, using local Ollama embeddings"
+      "description": "Semantic search over your past AI coding agent sessions, using local Ollama embeddings"
     }
   ]
 }

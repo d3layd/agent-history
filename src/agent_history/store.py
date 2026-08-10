@@ -100,6 +100,8 @@ def open_for_write() -> tuple[sqlite3.Connection, int]:
         """
     )
 
+    _ensure_fts(db)
+
     stored_model = _get_meta(db, "model")
     stored_dim = _get_meta(db, "dimension")
     wanted = config.model()
@@ -125,7 +127,13 @@ def open_for_write() -> tuple[sqlite3.Connection, int]:
     return db, int(stored_dim or 0)
 
 
-def open_for_read() -> sqlite3.Connection:
+def open_for_read(check_model: bool = True) -> sqlite3.Connection:
+    """Open the index read-only-ish.
+
+    `check_model=False` skips the embedding-model identity check — correct for
+    text-only search, which never embeds and works fine against an index built
+    with any model.
+    """
     path = config.db_path()
     if not path.exists():
         raise StoreError(
@@ -134,7 +142,7 @@ def open_for_read() -> sqlite3.Connection:
     db = _raw_connect(path)
     stored_model = _get_meta(db, "model")
     wanted = config.model()
-    if stored_model and stored_model != wanted:
+    if check_model and stored_model and stored_model != wanted:
         raise StoreError(
             f"index was built with model '{stored_model}' but '{wanted}' is "
             f"configured; a query embedded with a different model cannot match.\n"
@@ -171,10 +179,41 @@ def reset() -> None:
             try:
                 db.execute("DELETE FROM chunks")
                 db.execute("DROP TABLE IF EXISTS vec_chunks")
+                db.execute("DROP TABLE IF EXISTS fts_chunks")
                 db.execute("DELETE FROM meta WHERE key IN ('model', 'dimension')")
                 db.commit()
             finally:
                 db.close()
+
+
+def _ensure_fts(db: sqlite3.Connection) -> None:
+    """Create the full-text index, backfilling an index built before it existed.
+
+    FTS5 ships in practically every SQLite build, but it is a compile-time
+    option — when it is absent the store simply works vector-only.
+    """
+    try:
+        db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks "
+            "USING fts5(text, content='chunks', content_rowid='id')"
+        )
+        # count(*) on an external-content FTS table delegates to the content
+        # table, so it cannot reveal an empty index; the docsize shadow table
+        # holds one row per actually-indexed document.
+        indexed = db.execute("SELECT count(*) FROM fts_chunks_docsize").fetchone()[0]
+        stored = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        if indexed < stored:
+            db.execute("INSERT INTO fts_chunks(fts_chunks) VALUES('rebuild')")
+            db.commit()
+    except sqlite3.OperationalError:
+        return
+
+
+def fts_enabled(db: sqlite3.Connection) -> bool:
+    row = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fts_chunks'"
+    ).fetchone()
+    return row is not None
 
 
 def existing_hashes(db: sqlite3.Connection) -> set[str]:
@@ -204,6 +243,11 @@ def insert_chunk(
         "INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)",
         (cursor.lastrowid, embed.pack(vector)),
     )
+    if fts_enabled(db):
+        db.execute(
+            "INSERT INTO fts_chunks(rowid, text) VALUES (?, ?)",
+            (cursor.lastrowid, text),
+        )
 
 
 def query(
@@ -229,11 +273,110 @@ def query(
         (vector, fetch),
     ).fetchall()
 
+    return _filter(rows, cwd=cwd, agent=agent)[:k]
+
+
+_ROW_COLS = "c.agent, c.origin, c.session_id, c.cwd, c.timestamp, c.role, c.text"
+
+
+def text_query(
+    db: sqlite3.Connection,
+    query: str,
+    k: int,
+    *,
+    cwd: str | None = None,
+    agent: str | None = None,
+) -> list[tuple]:
+    """BM25-ranked full-text matches, same row shape as query() minus distance.
+
+    The query is quoted term-by-term so FTS5 operator syntax in ordinary
+    prose ("don't", "a-b", stray quotes) cannot break the MATCH expression.
+    """
+    if not fts_enabled(db):
+        return []
+    terms = [t for t in query.split() if t]
+    if not terms:
+        return []
+    match = " ".join('"' + t.replace('"', '""') + '"' for t in terms)
+    fetch = k * 4 if (cwd or agent) else k
+    try:
+        rows = db.execute(
+            f"SELECT {_ROW_COLS} "
+            "FROM fts_chunks f JOIN chunks c ON c.id = f.rowid "
+            "WHERE fts_chunks MATCH ? ORDER BY rank LIMIT ?",
+            (match, fetch),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return _filter(rows, cwd=cwd, agent=agent)[:k]
+
+
+def hybrid_query(
+    db: sqlite3.Connection,
+    vector: bytes,
+    query_text: str,
+    k: int,
+    *,
+    cwd: str | None = None,
+    agent: str | None = None,
+) -> list[tuple]:
+    """Merge vector and full-text rankings with reciprocal rank fusion.
+
+    Each list contributes 1/(60+rank) per hit; a chunk found by both ranks
+    above one found by either alone. Returns rows shaped like query() with an
+    RRF score appended: (..., distance | None, score).
+    """
+    vec_rows = query(db, vector, k * 2, cwd=cwd, agent=agent)
+    txt_rows = text_query(db, query_text, k * 2, cwd=cwd, agent=agent)
+
+    scored: dict[tuple, list] = {}
+    for rank, row in enumerate(vec_rows):
+        key = row[:7]
+        scored[key] = [row[7], 1.0 / (60 + rank)]
+    for rank, row in enumerate(txt_rows):
+        key = row[:7]
+        if key in scored:
+            scored[key][1] += 1.0 / (60 + rank)
+        else:
+            scored[key] = [None, 1.0 / (60 + rank)]
+
+    merged = sorted(scored.items(), key=lambda item: -item[1][1])
+    return [(*key, distance, score) for key, (distance, score) in merged[:k]]
+
+
+def _filter(rows: list[tuple], *, cwd: str | None, agent: str | None) -> list[tuple]:
     if agent:
         rows = [r for r in rows if r[0] == agent]
     if cwd:
         rows = [r for r in rows if cwd in (r[3] or "")]
-    return rows[:k]
+    return rows
+
+
+def session_rows(
+    db: sqlite3.Connection,
+    *,
+    origin: str | None = None,
+    session_id: str | None = None,
+) -> list[tuple]:
+    """Every chunk of one conversation, oldest first.
+
+    This reads the index, not the source transcript — deliberately, since for
+    a mature index most source files no longer exist.
+    """
+    where, params = [], []
+    if origin:
+        where.append("c.origin = ?")
+        params.append(origin)
+    if session_id:
+        where.append("c.session_id = ?")
+        params.append(session_id)
+    if not where:
+        return []
+    return db.execute(
+        f"SELECT {_ROW_COLS} FROM chunks c WHERE {' OR '.join(where)} "
+        "ORDER BY c.timestamp, c.id",
+        params,
+    ).fetchall()
 
 
 def stats(db: sqlite3.Connection) -> dict:
