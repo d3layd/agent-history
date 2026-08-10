@@ -7,13 +7,48 @@ mechanism works identically for file-backed and database-backed adapters.
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import sys
 import time
 
-from . import adapters, embed, store
+from . import adapters, config, embed, store
 from .textproc import chunk_text
 
 COMMIT_EVERY = 16
+
+
+def _guard_reindex(force: bool) -> int | None:
+    """Refuse a wipe that would destroy history whose sources are gone.
+
+    Agents delete old transcripts; for those chunks the index is the only
+    surviving copy, and a rebuild from disk cannot recreate them. Model
+    changes — the one legitimate reason to rebuild — have `reembed`, which
+    keeps everything. Returns an exit code to stop with, or None to proceed.
+    """
+    if not config.db_path().exists():
+        return None  # nothing exists yet; a "wipe" destroys nothing
+    try:
+        db = store.open_for_maintenance()
+    except store.StoreError as exc:
+        # Fail closed: an index this Python cannot open is one it cannot
+        # rebuild either — deleting it here would be pure loss.
+        print(f"reindex refused: the index exists but cannot be opened "
+              f"({exc}).", file=sys.stderr)
+        return 1
+    try:
+        chunks, origins = store.orphaned_counts(db)
+    finally:
+        db.close()
+    if chunks == 0 or force:
+        return None
+    print(
+        f"reindex refused: {chunks} chunk(s) from {origins} deleted "
+        "source(s) exist only in this index and would be lost.\n"
+        "  changing embedding model?  agent-history reembed   (keeps everything)\n"
+        "  really discard them?       agent-history reindex --force",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _pending(
@@ -52,8 +87,11 @@ def _pending(
     return out, produced, sorted(mutable_targets)
 
 
-def run(reindex: bool = False) -> int:
+def run(reindex: bool = False, force: bool = False) -> int:
     if reindex:
+        code = _guard_reindex(force)
+        if code is not None:
+            return code
         print("reindex: removing existing index")
         store.reset()
 
@@ -125,4 +163,122 @@ def run(reindex: bool = False) -> int:
     print(f"Done in {time.time() - started:.1f}s.")
     if failures:
         print(f"({failures} chunk(s) skipped due to embed errors)", file=sys.stderr)
+    return 0
+
+
+# ------------------------------------------------------------------- reembed
+
+def run_reembed() -> int:
+    """Re-embed every stored chunk with the configured model, losing nothing.
+
+    The chunk text lives in the index, so a model change never needs the
+    source transcripts — which is what makes this safe where `reindex` is
+    not. New vectors are staged into `vec_chunks_new` and swapped in only
+    when complete, so searches keep working against the old vectors
+    throughout, a crash or an Ollama outage leaves a resumable staging
+    table, and the index is never in a half-embedded state.
+    """
+    from . import trigger
+
+    # Hold the indexing lock for the whole run: a hook firing mid-reembed
+    # would insert old-dimension vectors that the swap then discards,
+    # leaving those chunks permanently unsearchable. With the lock held,
+    # hooks no-op (their 5-second timeout) and catch up afterwards.
+    with trigger._exclusive(config.lock_path()) as acquired:
+        if not acquired:
+            print("another indexing run holds the lock; retry shortly",
+                  file=sys.stderr)
+            return 1
+        return _reembed_locked()
+
+
+def _reembed_locked() -> int:
+    db = store.open_for_maintenance()
+    total = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
+    if total == 0:
+        print("index is empty; nothing to re-embed")
+        return 0
+
+    model = config.model()
+    dimension = embed.probe_dimension()
+    print(f"re-embedding {total} chunk(s) with {model} ({dimension}-dim)")
+
+    # Stage table, resumable: a prior interrupted run for the same model is
+    # continued; one for a different model is discarded. The table probe
+    # also heals a staging table that vanished out from under the marker.
+    staged_for = db.execute(
+        "SELECT value FROM meta WHERE key = 'reembed_model'"
+    ).fetchone()
+    try:
+        done = {row[0] for row in db.execute("SELECT rowid FROM vec_chunks_new")}
+    except sqlite3.OperationalError:
+        done = set()
+        staged_for = None
+    if staged_for is None or staged_for[0] != model:
+        db.execute("DROP TABLE IF EXISTS vec_chunks_new")
+        db.execute(
+            f"CREATE VIRTUAL TABLE vec_chunks_new "
+            f"USING vec0(embedding float[{dimension}])"
+        )
+        db.execute(
+            "INSERT INTO meta(key, value) VALUES ('reembed_model', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (model,),
+        )
+        db.commit()
+        done = set()
+    if done:
+        print(f"resuming: {len(done)} already staged")
+
+    # Materialised id list: no read cursor stays open across the writes and
+    # commits below, and a resumed run's rate reflects real work only.
+    todo = [row[0] for row in
+            db.execute("SELECT id FROM chunks ORDER BY id").fetchall()
+            if row[0] not in done]
+
+    started = time.time()
+    for position, rowid in enumerate(todo, 1):
+        text = db.execute(
+            "SELECT text FROM chunks WHERE id = ?", (rowid,)
+        ).fetchone()[0]
+        try:
+            vector = embed.embed(text)
+        except embed.EmbedError as exc:
+            db.commit()
+            print(f"\nstopped: {exc}\n"
+                  "progress is saved — rerun `agent-history reembed` to resume",
+                  file=sys.stderr)
+            return 1
+        db.execute(
+            "INSERT INTO vec_chunks_new(rowid, embedding) VALUES (?, ?)",
+            (rowid, embed.pack(vector)),
+        )
+        if position % COMMIT_EVERY == 0:
+            db.commit()
+            elapsed = max(time.time() - started, 0.001)
+            rate = position / elapsed
+            eta = (len(todo) - position) / max(rate, 0.001)
+            print(f"  {position}/{len(todo)}  ({rate:.1f}/s, eta {eta:.0f}s)")
+    db.commit()
+
+    # Atomic swap: the old vectors serve searches right up to this point.
+    db.execute("DROP TABLE vec_chunks")
+    db.execute(
+        f"CREATE VIRTUAL TABLE vec_chunks "
+        f"USING vec0(embedding float[{dimension}])"
+    )
+    db.execute(
+        "INSERT INTO vec_chunks(rowid, embedding) "
+        "SELECT rowid, embedding FROM vec_chunks_new"
+    )
+    db.execute("DROP TABLE vec_chunks_new")
+    for key, value in (("model", model), ("dimension", str(dimension))):
+        db.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+    db.execute("DELETE FROM meta WHERE key = 'reembed_model'")
+    db.commit()
+    print(f"Done in {time.time() - started:.1f}s — index now uses {model}.")
     return 0

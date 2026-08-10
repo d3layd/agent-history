@@ -3,15 +3,14 @@
 [![CI](https://github.com/d3layd/agent-history/actions/workflows/ci.yml/badge.svg)](https://github.com/d3layd/agent-history/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Local semantic search over your AI coding agent session transcripts.
+Local, private, zero-cost semantic memory for your AI coding agents — search
+everything you and your agents have ever discussed, across every agent on the
+machine, by meaning.
 
 You had a long conversation three weeks ago where you worked out why the auth
-flow had to be structured a particular way. You remember deciding it. You do not
-remember which project, which day, or what the reasoning was. `grep` is no help,
-because you don't remember the words you used.
-
-`agent-history` embeds every message from your past sessions into a local vector
-index, so you can ask for it by meaning instead of by keyword:
+flow had to be structured a particular way. You remember deciding it. You do
+not remember which project, which day, or what the reasoning was. `grep` is no
+help, because you don't remember the words you used.
 
 ```console
 $ agent-history search "why did we split the auth middleware"
@@ -20,30 +19,92 @@ $ agent-history search "why did we split the auth middleware"
     The reason to split it is that the session refresh needs to run before...
 ```
 
-Everything runs on your machine — embeddings come from your own Ollama instance.
-No API keys, no per-query cost, and nothing is sent off-box (the tool refuses a
-non-loopback endpoint unless you explicitly allow it).
+Everything runs on your machine. Embeddings come from your own Ollama
+instance; search runs inside SQLite. No API keys, no per-query cost, and
+nothing leaves the box — the tool refuses a non-loopback endpoint unless you
+explicitly allow it.
 
-It indexes transcripts from **Claude Code**, **OpenAI Codex CLI**,
-**OpenCode**, **Hermes**, and **OpenClaw** — every agent found on the machine,
-merged into one index, searchable together or filtered with `--agent`. Add
-[documentation trees](#indexing-documentation-trees) and the same search
-spans what was said *and* what was written down; switch on
-[context injection](#context-injection-opt-in) and relevant history rides
-into new prompts by itself.
+## What it does
 
-Search is **hybrid** by default: vector similarity finds meaning, BM25
-full-text finds the exact identifiers that embeddings are bad at (`os error
-11001`, a function name), and the two rankings are fused. `--mode text` works
-with no Ollama running at all.
+**One index across every agent on the machine.** Each source has an adapter
+that knows where that agent keeps its transcripts and how to read them:
+
+| source | reads | format |
+|---|---|---|
+| **Claude Code** | `~/.claude/projects/**` + project memory `*.md`, including the WSL Windows side | JSONL |
+| **OpenAI Codex CLI** | `~/.codex/sessions/**` rollouts, including the WSL Windows side | JSONL |
+| **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite |
+| **Hermes** | `~/.hermes*/state.db`, one per profile | SQLite |
+| **OpenClaw** | `~/.openclaw/agents/*/sessions/` + workspace markdown | JSONL |
+| **docs** (opt-in) | any documentation trees you name — runbooks, ops notes, session summaries | `*.md` / `*.txt` |
+
+Everything found is detected automatically (docs excepted — see
+[below](#indexing-documentation-trees)), merged into one index, searchable
+together or filtered with `--agent`.
+
+**Hybrid search.** Vector similarity finds meaning; BM25 full-text finds the
+exact identifiers embeddings are bad at (`os error 11001`, a function name);
+the rankings are fused. `--mode text` needs no Ollama at all, and hybrid
+degrades to it gracefully when the embedder is down.
+
+**The conversation, not just the hit.** `show` prints the conversation a
+search hit belongs to, and `serve` is a local web viewer over the same search
+— both read from the index, which matters because the source transcript
+[often no longer exists](#your-index-outlives-the-transcripts).
+
+**Context injection (opt-in).** Turn it on and relevant past-session excerpts
+ride into your new prompts automatically — the "agent already knows your
+project" experience, with no LLM anywhere in the loop:
+[details below](#context-injection-opt-in).
+
+**An archive that agents don't keep.** Claude Code deletes transcripts after
+30 days by default. The index doesn't. On the machine this was built for, 67%
+of the index came from conversations whose files no longer exist.
+
+## Quickstart
+
+```console
+$ uv tool install git+https://github.com/d3layd/agent-history
+$ agent-history index          # first run embeds everything; minutes, once
+$ agent-history "that thing we decided about caching"
+```
+
+The first index of a large history takes a while — it embeds every message
+once. Every run after is incremental and takes seconds.
+
+Or clone and run the installer, which also checks Ollama, pulls the model if
+missing, and offers to wire up automatic indexing:
+
+```console
+$ git clone https://github.com/d3layd/agent-history
+$ cd agent-history && ./scripts/install.sh
+```
+
+### As a Claude Code plugin
+
+```
+/plugin marketplace add d3layd/agent-history
+/plugin install history@agent-history
+```
+
+This adds a **`/history:search`** command that runs the search and
+*synthesizes an answer* from the results rather than making you read raw
+JSONL, plus three hooks: SessionEnd and PreCompact keep the index current
+automatically, and UserPromptSubmit stays inert unless you opt into
+[context injection](#context-injection-opt-in).
+
+The plugin is named `history` rather than `agent-history` purely for
+ergonomics: Claude Code namespaces every plugin component as
+`<plugin>:<component>` with no way to opt out, so a long plugin name makes for
+a long command. The repository and the CLI keep the full `agent-history` name.
 
 ## Requirements
 
-- **Python 3.10+**, with a `sqlite3` module that permits extension loading (see
-  below)
-- **[Ollama](https://ollama.com) reachable over HTTP**, with an embedding model
-  pulled — needed for indexing and for vector/hybrid search. `--mode text`
-  (BM25 full-text) works without it.
+- **Python 3.10+**, with a `sqlite3` module that permits extension loading
+  (see below)
+- **[Ollama](https://ollama.com) reachable over HTTP**, with an embedding
+  model pulled — needed for indexing and for vector/hybrid search.
+  `--mode text` (BM25 full-text) works without it.
 - **[`uv`](https://docs.astral.sh/uv/)** to install
 
 ```console
@@ -58,13 +119,14 @@ resolved:
 | direct | `sqlite-vec`, `requests` |
 | transitive | `certifi`, `charset-normalizer`, `idna`, `urllib3` |
 
-No vector database, no ML framework, no ORM. The index is a single SQLite file.
+No vector database, no ML framework, no ORM. The index is a single SQLite
+file.
 
 **Two things that are easy to get wrong:**
 
 *Extension loading.* Vectors live in the
-[`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension, so the `sqlite3`
-module must allow loading it. Check with:
+[`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension, so the
+`sqlite3` module must allow loading it. Check with:
 
 ```console
 $ python3 -c "import sqlite3; sqlite3.connect(':memory:').enable_load_extension(True)"
@@ -75,16 +137,16 @@ support and the tool cannot work under it. `agent-history doctor` reports this
 explicitly rather than failing obscurely.
 
 **Known: this affects macOS.** CI shows uv-managed CPython on macOS lacks
-extension support on **Python 3.11, 3.12 and 3.13**, while **3.10 works**. It is
-a property of the Python build, not of macOS itself — Homebrew's `python3`
+extension support on **Python 3.11, 3.12 and 3.13**, while **3.10 works**. It
+is a property of the Python build, not of macOS itself — Homebrew's `python3`
 generally works. On macOS either install under 3.10:
 
 ```console
 $ uv tool install --python 3.10 git+https://github.com/d3layd/agent-history
 ```
 
-or use a Python where the check above succeeds. The same limitation appears in
-some Conda and Linux distribution builds.
+or use a Python where the check above succeeds. The same limitation appears
+in some Conda and Linux distribution builds.
 
 *The Ollama CLI is not required.* Only the HTTP endpoint is. Ollama can run on
 another OS entirely — the setup this was built on has Ollama native on Windows
@@ -98,77 +160,67 @@ identically on Linux, macOS and Windows. The scripts under `scripts/` are
 conveniences for installation and scheduling — `.sh` for Unix, `.ps1` for
 Windows — and the Unix ones avoid bash 4 builtins so macOS's bash 3.2 works.
 
-## Install
-
-```console
-$ uv tool install git+https://github.com/d3layd/agent-history
-$ agent-history index
-```
-
-The first index of a large history takes a while — it embeds every message once.
-Subsequent runs only handle what's new, and take seconds.
-
-Or clone and run the installer, which also checks Ollama, pulls the model if it
-is missing, and offers to wire up automatic indexing:
-
-```console
-$ git clone https://github.com/d3layd/agent-history
-$ cd agent-history && ./scripts/install.sh
-```
-
-### As a Claude Code plugin
-
-```
-/plugin marketplace add d3layd/agent-history
-/plugin install history@agent-history
-```
-
-This adds a **`/history:search`** command that runs the search and *synthesizes
-an answer* from the results, rather than making you read raw JSONL:
-
-```
-/history:search why did we split the auth middleware
-```
-
-It also installs SessionEnd and PreCompact hooks that keep the index current
-automatically, and a UserPromptSubmit hook that stays inert unless you opt
-into [context injection](#context-injection-opt-in) with
-`agent-history inject on`.
-
-The plugin is named `history` rather than `agent-history` purely for ergonomics:
-Claude Code namespaces every plugin component as `<plugin>:<component>`, with no
-way to opt out, so a long plugin name makes for a long command. The repository
-and the CLI keep the full `agent-history` name.
-
 ## Usage
 
 ```console
-$ agent-history search "query"              # top 8 matches
+$ agent-history search "query"              # top 8 hybrid matches
 $ agent-history search "query" -k 20        # more results
 $ agent-history search "query" --full       # full chunk text, not a preview
 $ agent-history search "query" --cwd myapp  # only sessions from a directory
-$ agent-history search "query" --agent codex   # one agent's sessions only
+$ agent-history search "query" --agent codex   # one source only
 $ agent-history search "query" --mode text  # exact match, no Ollama needed
+$ agent-history search "query" --mode vector   # embeddings only
 $ agent-history search "query" --json       # machine-readable
 $ agent-history "query"                     # `search` is the default
 
 $ agent-history show <session-or-origin>    # the conversation around a hit
 $ agent-history show s1 --around 2026-06-14T22:03  # centred on a timestamp
+$ agent-history serve                       # web viewer at http://127.0.0.1:8127
 
-$ agent-history serve      # local web viewer at http://127.0.0.1:8127
-$ agent-history index      # incremental update
-$ agent-history reindex    # wipe and rebuild
-$ agent-history sources    # show which directories are scanned
-$ agent-history doctor     # diagnose the installation
+$ agent-history docs add ~/ops-library      # index a documentation tree
+$ agent-history inject on                   # opt into context injection
+
+$ agent-history index                       # incremental update (the default)
+$ agent-history reembed                     # switch embedding model, keep everything
+$ agent-history reindex --force             # wipe and rebuild (destructive)
+$ agent-history sources                     # what will be scanned
+$ agent-history doctor                      # diagnose the installation
 ```
 
-A search hit is a chunk; `show` prints the conversation it came from, read
-from the index rather than the source transcript — which is the point, because
-the transcript often no longer exists (see below). The viewer serves the same
-search and conversation views in a browser, binds strictly to loopback, and
-has no flag to change that.
+A search hit is a chunk; `show` prints the conversation it came from. Start
+with `doctor` if anything misbehaves — it reports whether Ollama is reachable,
+what was detected, how much is indexed, and flags misconfigured docs roots.
 
-### Indexing documentation trees
+## Context injection (opt-in)
+
+```console
+$ agent-history inject on
+```
+
+With this enabled, a UserPromptSubmit hook embeds each prompt you type
+(locally, via Ollama), retrieves past-session chunks relevant to it, and
+injects them as context — so the agent already knows what you decided three
+weeks ago without being told. **No LLM is involved anywhere**: the prompt is
+the retrieval query, and the chunks arrive verbatim. Tools like claude-mem
+buy this experience with LLM compression passes; retrieval alone turns out to
+be enough, at zero token cost and with the original wording intact.
+
+Unsolicited context has to clear a much higher bar than search results you
+asked for, so this is precision-first:
+
+- An absolute distance cutoff rejects weak matches
+  (`AGENT_HISTORY_INJECT_MAX_DIST`, default 17.0 — recalibrate if you change
+  embedding model).
+- At most 3 chunks / ~2 KB per prompt; near-duplicates collapse.
+- Your current session's own chunks are excluded — the agent has that context.
+- Trivial prompts ("ok", "go ahead") and slash commands are skipped.
+- When Ollama is down, nothing is injected. Every failure path is a silent
+  no-op — the hook can never break a prompt.
+
+`agent-history inject off` turns it back off; `inject status` shows the
+current state.
+
+## Indexing documentation trees
 
 Transcripts answer "what was said"; a docs tree answers "what was written
 down". Name your documentation roots and both land in the same index:
@@ -185,84 +237,120 @@ Windows especially. `docs list` and `docs remove` manage the set;
 `$AGENT_HISTORY_DOCS_DIRS` (os.pathsep-separated) still works and is merged
 in.
 
-(Export the variable persistently for the hooks to pick it up.) This is
-opt-in only — nothing is auto-detected. Markdown and `.txt` files are
-indexed recursively; vendored and hidden directories (`node_modules`,
-`.git`, …) are pruned, and files over 2MB are treated as logs and skipped.
+This is opt-in only — nothing is auto-detected, because guessing at
+documentation locations would mean reading directories you never offered.
+Markdown and `.txt` files are indexed recursively; vendored and hidden
+directories (`node_modules`, `.git`, …) are pruned; symbolic links may not
+escape the configured root; files over 2 MB are treated as logs and skipped.
 
 **Edited docs are refreshed, not accumulated.** Docs are the one *mutable*
 source the store reads, so they get the one delete path it has: when a
-re-indexed document no longer contains some previously indexed text, those
+re-read document no longer contains some previously indexed text, those
 chunks are removed — from the vector index and the full-text index too. The
-rule is deliberately conservative: only a document that was actually
-re-read is eligible, text still produced by *anything* this run survives,
-and a doc deleted from disk keeps its chunks. Transcripts are append-only
-in reality and stay append-only here; for them the index's permanence is
-the whole point.
+rule is deliberately conservative: only a document actually re-read this run
+is eligible, text still produced by *anything* this run survives, and a doc
+deleted from disk keeps its chunks. Transcripts are append-only in reality
+and stay append-only here.
 
-Start with `doctor` if anything misbehaves — it reports whether Ollama is
-reachable, whether the model is pulled, what was detected, and how much is
-indexed.
+Together with the Hermes and OpenClaw adapters, this lets one agent-history
+install replace a hand-rolled transcript-plus-docs indexer — the
+Ollama-embeddings-over-SQLite pattern many ops setups grow — with hybrid
+search over all of it.
 
-## `reindex` is destructive
+## Your index outlives the transcripts
 
 **Claude Code deletes your old transcripts by default.** The
-[`cleanupPeriodDays`](https://code.claude.com/docs/en/settings) setting defaults
-to **30 days**, and the sweep runs at startup:
+[`cleanupPeriodDays`](https://code.claude.com/docs/en/settings) setting
+defaults to **30 days**, and the sweep runs at startup:
 
-> "Claude Code deletes session files and other application data older than this
-> period at startup."
+> "Claude Code deletes session files and other application data older than
+> this period at startup."
 
-There is no archive directory. Once a transcript is swept, **your index is the
-only surviving copy of that conversation**.
+There is no archive directory. Once a transcript is swept, **your index is
+the only surviving copy of that conversation**.
 
-This is why the tool is worth more than it first appears: the index outlives the
-transcripts and keeps answering questions about work whose source files are
-gone. On the machine this was built for, **67% of a mature index — 25,727 chunks
-from 1,616 files — came from transcripts that no longer existed.** The single
-best answer to "why does SessionEnd not always fire" lived in a session whose
-file had been swept months earlier.
+This is why the tool is worth more than it first appears. On the machine it
+was built for, **67% of a mature index — 25,727 chunks from 1,616 files —
+came from transcripts that no longer existed.** The single best answer to
+"why does SessionEnd not always fire" lived in a session whose file had been
+swept months earlier.
 
-The mechanism is measurable. Comparing every indexed transcript against what is
-still on disk:
+The mechanism is measurable. Comparing every indexed transcript against what
+was still on disk:
 
 | | files | median age of last message |
 |---|---|---|
 | still on disk | 250 | 7 days |
 | **deleted** | **1,616** | **51 days** |
 
-**Not one deleted transcript was younger than 30 days.** That hard floor is the
-retention policy, not chance. Unless you have raised `cleanupPeriodDays`, the
-same is happening to you right now.
+**Not one deleted transcript was younger than 30 days.** That hard floor is
+the retention policy, not chance. Unless you have raised `cleanupPeriodDays`,
+the same is happening to you right now.
 
-`reindex` wipes the index and rebuilds it from what is on disk *today*, so it
-permanently discards all of that. Use `index` (incremental, additive, the
-default) for normal operation. Reach for `reindex` only when you are changing
-embedding model, and only if you accept losing history whose transcripts are
-gone.
+Three commands follow from this, in order of how often you should use them:
 
-## How it works
+- **`index`** — incremental, additive, the default. All the hooks ever run.
+- **`reembed`** — switching embedding models **without losing anything**. The
+  chunk text lives in the index, so a model change never needs the source
+  files: every stored chunk is re-embedded with the new model, staged
+  alongside the old vectors (searches keep working throughout), and swapped
+  in atomically at the end. Interrupted by a crash or an Ollama outage, it
+  resumes where it stopped.
+- **`reindex`** — wipe and rebuild from what is on disk *today*, permanently
+  discarding history whose sources are gone. It now **refuses to run** when
+  orphaned chunks exist, tells you how many conversations you'd lose, and
+  requires `--force` to proceed. There is almost never a reason to: model
+  changes have `reembed`.
+
+## Automatic indexing
+
+The plugin installs three hooks:
+
+- **SessionEnd** — index when a session finishes
+- **PreCompact** — index before context is compacted, so nothing is lost
+- **UserPromptSubmit** — inert unless
+  [context injection](#context-injection-opt-in) is switched on; it
+  retrieves, it never indexes
+
+One honest caveat: `SessionEnd` only fires on a *clean* exit. Kill the
+terminal and that session is not indexed until something else triggers a run.
+Gaps are expected, not a bug. For a safety net, add a cron entry that indexes
+only when a session is active and something actually changed:
+
+```cron
+0 * * * * pgrep -x claude >/dev/null && agent-history trigger cron --if-changed
+```
+
+On Windows, `install.ps1` offers to register the equivalent Scheduled Task.
+
+`--if-changed` compares your sources against a stamp file and exits before
+waking Ollama when there is nothing to do, so idle hours cost nothing. For
+docs trees it consults the adapter's own pruned file set, so a touched
+`node_modules` readme or an oversized log can never wake the indexer.
+
+## How indexing works
 
 ```
-transcripts ──▶ adapter ──▶ filter ──▶ chunk ──▶ embed ──▶ sqlite-vec
- (JSONL/SQLite)   normalise   drop noise  ~1500ch   Ollama    + SHA-256 dedup
+sources ──▶ adapter ──▶ filter ──▶ chunk ──▶ embed ──▶ sqlite-vec + FTS5
+ (JSONL/SQLite/md)  normalise  drop noise  ~1500ch   Ollama    + SHA-256 dedup
 ```
 
-**1. Adapters normalise.** Each agent stores transcripts differently — some as
-append-only JSONL, some in SQLite. An adapter turns whichever it is into a
+**1. Adapters normalise.** Each agent stores transcripts differently — some
+as append-only JSONL, some in SQLite. An adapter turns whichever it is into a
 common `Record` (agent, origin, session, cwd, timestamp, role, text). Nothing
 downstream knows which agent it came from.
 
 **2. Filtering does most of the work.** The overwhelming majority of a
-transcript is tool traffic — file reads, diffs, command output — which is bulky
-and semantically useless to search. Measured across a real 293 MB corpus:
+transcript is tool traffic — file reads, diffs, command output — which is
+bulky and semantically useless to search. Measured across a real 293 MB
+corpus:
 
 | stage | count |
 |---|---|
 | raw JSONL lines | 87,627 |
 | user/assistant messages | 63,341 |
 | dropped: tool calls and results only | 54,506 |
-| dropped: harness noise (`<system-reminder>`, `<local-command>`, …) | 321 |
+| dropped: harness noise (`<system-reminder>`, heartbeats, …) | 321 |
 | dropped: under 20 characters | 109 |
 | **kept as records** | **9,195** |
 
@@ -270,32 +358,24 @@ That is **11.0 MB of actual conversation out of 293 MB on disk — 3.8%**. The
 index is small because 96% of what agents write down is not conversation.
 
 **3. Chunking.** Messages longer than 1500 characters are split with 200
-characters of overlap, so a passage spanning a boundary is still findable. Runs
-of 300+ base64-ish characters are replaced with `[blob]` first — embedding an
-encoded payload costs time and matches nothing. 9,195 records became 12,819
-chunks.
+characters of overlap, so a passage spanning a boundary is still findable.
+Runs of 300+ base64-ish characters are replaced with `[blob]` first —
+embedding an encoded payload costs time and matches nothing.
 
-**4. Embedding and storage.** Each chunk goes to Ollama and lands in SQLite with
-the [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension: a `chunks`
-table for text and metadata, a `vec_chunks` virtual table for the vectors, and a
-`meta` table recording which model built the index.
+**4. Embedding and storage.** Each chunk goes to Ollama and lands in SQLite:
+a `chunks` table for text and metadata, a `vec_chunks` virtual table
+([`sqlite-vec`](https://github.com/asg017/sqlite-vec)) for the vectors, an
+`fts_chunks` table (FTS5) for full-text, and `meta` recording which model
+built the index.
 
 **5. Dedup makes re-runs cheap.** Every chunk is keyed by the SHA-256 of its
 text. Re-indexing skips anything already embedded, so the expensive step only
-ever runs on genuinely new content. This works identically for file-backed and
-database-backed adapters — no per-source watermark bookkeeping.
+ever runs on genuinely new content — identically for file-backed and
+database-backed adapters, with no per-source watermark bookkeeping.
 
-Claude Code project memory files (`~/.claude/projects/*/memory/*.md`) are indexed
-alongside transcripts. They are 3% of chunks but hand-written and durable, and
-are often the single most useful thing a search surfaces.
-
-### What ends up in the index
-
-| | |
-|---|---|
-| assistant messages | 9,596 (75%) |
-| user messages | 2,873 (22%) |
-| memory files | 350 (3%) |
+Claude Code project memory files (`~/.claude/projects/*/memory/*.md`) and
+OpenClaw workspace markdown are indexed alongside transcripts: hand-written,
+durable, and often the single most useful thing a search surfaces.
 
 ## What it costs
 
@@ -323,24 +403,25 @@ depends downward, and `cli` is the only module aware of all the others.
 
 ```
         ┌──────────────────────────────────────────────────────────┐
- ENTRY  │  cli.py (287)  index │ reindex │ search │ show │ serve   │
-        │      docs │ inject │ sources │ doctor │ datadir │ trigger│
+ ENTRY  │  cli.py (~300)  index │ reindex │ reembed │ search │ show│
+        │    serve │ docs │ inject │ sources │ doctor │ trigger    │
         └──────┬────────────────────────────┬──────────────────────┘
                │                            │
         ┌──────▼─────────┐  ┌───────────────▼───────────────────────┐
- FLOWS  │ index.py (128) │  │ search.py (130)   hybrid RRF          │
+ FLOWS  │ index.py (~250)│  │ search.py (130)   hybrid RRF          │
         │  collect→dedup │  │ show.py (90)      conversation view   │
         │  →refresh docs │  │ viewer.py (252)   loopback web UI     │
         │  →embed→store  │  │ inject.py (158)   prompt-time recall  │
-        └───┬────────┬───┘  │ trigger.py (191)  hook-driven indexing│
-            │        │      └────┬────────────────────┬─────────────┘
+        │  reembed: swap │  │ trigger.py (191)  hook-driven indexing│
+        └───┬────────┬───┘  └────┬────────────────────┬─────────────┘
+            │        │           │                    │
     ┌───────▼───┐    │           │                    │
  IN │ adapters/ │    │           │                    │
     │ 6 sources │    │           │                    │
     │ Record ×N │    │           │                    │
     └───────────┘    │           │                    │
                 ┌────▼───────────▼────────────┐ ┌─────▼───────────┐
- OUT            │      store.py (435)         │ │  embed.py (102) │
+ OUT            │      store.py (~470)        │ │  embed.py (102) │
                 │ schema, dedup, kNN, BM25,   │ │  Ollama client  │
                 │ RRF, the docs delete path   │ └─────┬───────────┘
                 └──────────────┬──────────────┘       │
@@ -348,24 +429,27 @@ depends downward, and `cli` is the only module aware of all the others.
                      SQLite + sqlite-vec + FTS5   HTTP :11434
                                │                      │
         ┌──────────────────────▼──────────────────────▼───────────┐
- BASE   │  config.py (300) — every path and env var, imports      │
+ BASE   │  config.py (~330) — every path and env var, imports     │
         │  nothing.  textproc.py (32) — chunk + scrub, pure.      │
         └─────────────────────────────────────────────────────────┘
 ```
 
 **Adapters** are the extensibility seam. One answers three questions —
 `available()`, `roots()`, `records()` — and yields `Record(agent, origin,
-session_id, cwd, timestamp, role, text)`. Nothing downstream knows which agent
-produced a record, which is why `origin` is a string: a file path for the
-JSONL agents (Claude Code, Codex, OpenClaw), `db:<path>#<table>` for the
-SQLite-backed ones (OpenCode, Hermes). Two optional capabilities extend the
-seam: `watch_files()` lets an adapter own its change-detection file set, and
-`mutable = True` opts a source into stale-chunk refresh — docs is the only
-adapter that sets either.
+session_id, cwd, timestamp, role, text)`. Nothing downstream knows which
+agent produced a record, which is why `origin` is a string: a file path for
+the JSONL agents, `db:<path>#<table>` for the SQLite-backed ones. Two
+optional capabilities extend the seam: `watch_files()` lets an adapter own
+its change-detection file set, and `mutable = True` opts a source into
+stale-chunk refresh — docs is the only adapter that sets either. The
+SQLite-backed adapters open their sources read-only and select named columns
+only: agent databases keep OAuth tokens and system prompts in neighbouring
+tables and columns, and `SELECT *` is how those would end up in a search
+index.
 
 **`config.py`** is the single source of truth for location. No other module
-contains a hardcoded path. It also owns the security posture — `0700` creation,
-the loopback policy, WSL profile disambiguation.
+contains a hardcoded path. It also owns the security posture — `0700`
+creation, the loopback policy, WSL profile disambiguation.
 
 **`embed.py`** is the only code that touches the network.
 
@@ -381,23 +465,23 @@ meta(key, value)                              -- model, dimension
 
 Three decisions carry most of the weight:
 
-- **`content_hash UNIQUE` is the entire incremental strategy.** No watermarks,
-  no mtime tracking, no per-source bookkeeping — and it behaves identically for
-  append-only JSONL and for SQLite sources.
+- **`content_hash UNIQUE` is the entire incremental strategy.** No
+  watermarks, no mtime tracking, no per-source bookkeeping — and it behaves
+  identically for append-only JSONL and for SQLite sources.
 - **`meta` makes the dimension dynamic** rather than a hardcoded 768, and
   doubles as the model-mismatch detector.
-- **`vec_chunks` joins by rowid**, keeping the vector table a pure vector store.
-  `sqlite-vec` expands it into four shadow tables underneath.
+- **`vec_chunks` joins by rowid**, keeping the vector table a pure vector
+  store.
 
 ### Who does what
 
-A common misreading is that Ollama performs the search. It does not — it never
-sees the index. Ollama converts text to vectors, and that is all: once per chunk
-at index time, once per query at search time. The nearest-neighbour search runs
-inside SQLite, in-process, with no network involved — and so does the BM25
-full-text half of a hybrid query, via FTS5. That is why `--mode text` keeps
-working when Ollama is down, and why hybrid search degrades to it rather than
-failing.
+A common misreading is that Ollama performs the search. It does not — it
+never sees the index. Ollama converts text to vectors, and that is all: once
+per chunk at index time, once per query at search time. The
+nearest-neighbour search runs inside SQLite, in-process, with no network
+involved — and so does the BM25 full-text half of a hybrid query, via FTS5.
+That is why `--mode text` keeps working when Ollama is down, and why hybrid
+search degrades to it rather than failing.
 
 | | |
 |---|---|
@@ -406,62 +490,17 @@ failing.
 
 `sqlite-vec` is a real vector index, not a BLOB column scanned in Python:
 `vec_chunks` is a virtual table with its own packed storage format, and
-`MATCH ? AND k = 8` is a kNN operator implemented in C. The accurate description
-is an embedded vector database living inside a SQLite file — the same way SQLite
-is a real database that happens to be a file rather than a server.
+`MATCH ? AND k = 8` is a kNN operator implemented in C. The accurate
+description is an embedded vector database living inside a SQLite file — the
+same way SQLite is a real database that happens to be a file rather than a
+server.
 
-**The limitation that follows from this:** `sqlite-vec` does *exhaustive* kNN.
-There is no HNSW or IVF approximate index, so search cost is linear in corpus
-size — the query plan says `SCAN`, not `SEARCH`. At 12,819 vectors that is 27 ms
-and irrelevant. At a few hundred thousand it becomes noticeable; at millions you
-would want a different store. For a personal transcript index the ceiling is
-remote, and in exchange there is no daemon, no server, and no separate process
-to keep alive.
-
-## Context injection (opt-in)
-
-```console
-$ agent-history inject on
-```
-
-With this enabled, a UserPromptSubmit hook embeds each prompt you type
-(locally, via Ollama), retrieves past-session chunks relevant to it, and
-injects them as context — so the agent already knows what you decided three
-weeks ago without being told. No LLM is involved anywhere: the prompt is the
-retrieval query, and the chunks arrive verbatim.
-
-Unsolicited context has to clear a much higher bar than search results you
-asked for, so this is precision-first: an absolute distance cutoff rejects
-weak matches (`AGENT_HISTORY_INJECT_MAX_DIST`, default 17.0 —
-recalibrate if you change embedding model), at most 3 chunks / ~2KB per
-prompt, your current session's own chunks are excluded, trivial prompts and
-slash commands are skipped, and when Ollama is down nothing is injected.
-Every failure path is a silent no-op — the hook can never break a prompt.
-`agent-history inject off` turns it back off.
-
-## Automatic indexing
-
-The plugin installs three hooks:
-
-- **SessionEnd** — index when a session finishes
-- **PreCompact** — index before context is compacted, so nothing is lost
-- **UserPromptSubmit** — inert unless
-  [context injection](#context-injection-opt-in) is switched on; it
-  retrieves, it never indexes
-
-One honest caveat: `SessionEnd` only fires on a *clean* exit. Kill the terminal
-and that session is not indexed until something else triggers a run. Gaps are
-expected, not a bug. For a safety net, add a cron entry that indexes only when a
-session is active and something actually changed:
-
-```cron
-0 * * * * pgrep -x claude >/dev/null && agent-history trigger cron --if-changed
-```
-
-On Windows, `install.ps1` offers to register the equivalent Scheduled Task.
-
-`--if-changed` compares your transcripts against a stamp file and exits before
-waking Ollama when there is nothing to do, so idle hours cost nothing.
+**The limitation that follows from this:** `sqlite-vec` does *exhaustive*
+kNN. There is no HNSW or IVF approximate index, so search cost is linear in
+corpus size. At 12,819 vectors that is 27 ms and irrelevant. At a few hundred
+thousand it becomes noticeable; at millions you would want a different store.
+For a personal transcript index the ceiling is remote, and in exchange there
+is no daemon, no server, and no separate process to keep alive.
 
 ## Configuration
 
@@ -470,14 +509,22 @@ waking Ollama when there is nothing to do, so idle hours cost nothing.
 | `AGENT_HISTORY_HOME` | `$XDG_DATA_HOME/agent-history` | Where the index lives |
 | `AGENT_HISTORY_MODEL` | `nomic-embed-text` | Ollama embedding model |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |
-| `AGENT_HISTORY_PROJECTS` | `~/.claude/projects` | Claude Code transcript root |
-| `AGENT_HISTORY_EXTRA_DIRS` | – | Extra transcript roots, colon-separated |
-| `AGENT_HISTORY_NO_WSL` | – | Set to `1` to skip Windows-side transcripts |
 | `AGENT_HISTORY_ALLOW_REMOTE` | – | Set to `1` to permit a non-loopback `OLLAMA_URL` |
+| `AGENT_HISTORY_PROJECTS` | `~/.claude/projects` | Claude Code transcript root |
+| `AGENT_HISTORY_CODEX` | `~/.codex/sessions` | Codex rollout root |
+| `AGENT_HISTORY_OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | OpenCode database |
+| `AGENT_HISTORY_HERMES_DIRS` | `~/.hermes*` | Hermes profile homes, os.pathsep-separated |
+| `AGENT_HISTORY_OPENCLAW_DIRS` | `~/.openclaw` | OpenClaw state roots, os.pathsep-separated |
+| `AGENT_HISTORY_DOCS_DIRS` | – | Docs trees (prefer `agent-history docs add`) |
+| `AGENT_HISTORY_EXTRA_DIRS` | – | Extra transcript roots, os.pathsep-separated |
+| `AGENT_HISTORY_NO_WSL` | – | Set to `1` to skip Windows-side transcripts |
+| `AGENT_HISTORY_INJECT` | – | `1`/`0` overrides the injection flag file |
+| `AGENT_HISTORY_INJECT_MAX_DIST` | `17.0` | Injection relevance cutoff (L2 distance) |
 
-Switching `AGENT_HISTORY_MODEL` requires a `reindex` — vectors from different
-models are not comparable. The tool detects the mismatch and tells you, rather
-than silently returning nonsense.
+Switching `AGENT_HISTORY_MODEL` calls for **`agent-history reembed`** —
+vectors from different models are not comparable, and the tool detects the
+mismatch and tells you rather than silently returning nonsense. `reembed`
+rebuilds the vectors from the text already in the index, so nothing is lost.
 
 ## Platform support
 
@@ -487,10 +534,10 @@ than silently returning nonsense.
 | **macOS** | supported on **Python 3.10**; 3.11–3.13 lack SQLite extension support (see Requirements) |
 | **Windows** | supported, CI on Python 3.10–3.13 — with one caveat below |
 
-**On Windows the index is not owner-only.** POSIX mode bits do not exist there,
-so where Linux and macOS create `index.db` as `0600` inside a `0700` directory,
-Windows falls back to whatever the parent directory's ACL grants. Given the
-index contains credentials that appeared in your transcripts, put
+**On Windows the index is not owner-only.** POSIX mode bits do not exist
+there, so where Linux and macOS create `index.db` as `0600` inside a `0700`
+directory, Windows falls back to whatever the parent directory's ACL grants.
+Given the index contains credentials that appeared in your transcripts, put
 `AGENT_HISTORY_HOME` somewhere already protected, or restrict it yourself:
 
 ```powershell
@@ -498,8 +545,8 @@ icacls "$env:LOCALAPPDATA\agent-history" /inheritance:r /grant:r "$env:USERNAME:
 ```
 
 Windows uses `%LOCALAPPDATA%\agent-history` by default rather than
-`~/.local/share`, and `AGENT_HISTORY_EXTRA_DIRS` is separated by `;` there
-rather than `:` — a colon would split drive letters.
+`~/.local/share`, and os.pathsep-separated variables use `;` there rather
+than `:` — a colon would split drive letters.
 
 Install and sync with the PowerShell equivalents:
 
@@ -510,12 +557,12 @@ Install and sync with the PowerShell equivalents:
 
 ### WSL
 
-When running inside WSL, transcripts written by Claude Code on the Windows host
-are picked up automatically, so one index covers both sides. WSL cannot tell
-which Windows account is yours, so a profile is selected only when exactly one
-under `/mnt/c/Users` has transcripts; if several do, none is chosen and you are
-told to name one via `AGENT_HISTORY_EXTRA_DIRS`. Set `AGENT_HISTORY_NO_WSL=1` to
-opt out entirely.
+When running inside WSL, transcripts written by Claude Code or Codex on the
+Windows host are picked up automatically, so one index covers both sides. WSL
+cannot tell which Windows account is yours, so a profile is selected only
+when exactly one under `/mnt/c/Users` has that agent's transcripts; if
+several do, none is chosen and you are told to name one via
+`AGENT_HISTORY_EXTRA_DIRS`. Set `AGENT_HISTORY_NO_WSL=1` to opt out entirely.
 
 ## Privacy and security
 
@@ -525,39 +572,45 @@ pasted or that a tool printed. Auditing a real 12,819-chunk index built from
 ordinary daily use turned up live database URIs with passwords, API keys, and
 32 distinct `password=` assignments. Assume yours is the same.
 
-Consequences worth internalising:
+The posture that follows:
 
-- `index.db` deserves the same handling as `~/.ssh`. It is created `0600` inside
-  a `0700` directory — deliberately, since the default umask would otherwise
-  make it world-readable on a shared machine.
-- Never commit it. `.gitignore` excludes `*.db` and `*.log`.
-- Think twice before putting `AGENT_HISTORY_HOME` in a synced, backed-up, or
-  cloud-mounted directory.
-- There is **no encryption at rest**. Full-disk encryption is the answer.
+- `index.db` deserves the same handling as `~/.ssh`. It is created `0600`
+  inside a `0700` directory — deliberately, since the default umask would
+  otherwise make it world-readable on a shared machine. Never commit it;
+  think twice before a synced or cloud-mounted `AGENT_HISTORY_HOME`; there is
+  no encryption at rest — full-disk encryption is the answer.
+- **Nothing is sent off your machine by default.** A non-loopback
+  `OLLAMA_URL` is refused unless you set `AGENT_HISTORY_ALLOW_REMOTE=1`,
+  because pointing it elsewhere would stream your entire history there.
+- **The viewer binds strictly to 127.0.0.1** and has no flag to change it.
+- **SQLite sources are read read-only, named columns only** — the same
+  databases hold OAuth tokens and system prompts that must never reach the
+  index.
+- **Docs trees are opt-in, pruned, and contained** — symbolic links inside a
+  configured root may not reach files outside it.
+- **Shared machines:** on WSL, a Windows profile is auto-detected only when
+  exactly one has transcripts; if several do, none is indexed — pulling a
+  colleague's conversations into your index would be worse than indexing
+  nothing.
 
-**Nothing is sent off your machine by default.** Embeddings come from your own
-Ollama instance. Because that endpoint is configurable, and pointing it
-elsewhere would stream your entire history to a third party, a non-loopback
-`OLLAMA_URL` is refused unless you set `AGENT_HISTORY_ALLOW_REMOTE=1`:
+## What it is — and isn't
 
-```console
-$ OLLAMA_URL=http://someone-elses-box:11434 agent-history index
-error: OLLAMA_URL points at a remote host (http://someone-elses-box:11434).
-Indexing sends the full text of your conversations there. If that is genuinely
-intended, set AGENT_HISTORY_ALLOW_REMOTE=1 to confirm.
-```
+The "agents forget everything" space splits into two philosophies. Tools like
+claude-mem observe sessions, compress them with LLM calls into structured
+memories, and inject summaries. agent-history makes the opposite trade: **the
+original words, kept verbatim, at zero ongoing cost** — no summarization
+pass, no token spend, no lossy compression between you and what was actually
+said. [Context injection](#context-injection-opt-in) shows the trade holds
+even for the "agent already knows" experience: retrieval alone gets there.
 
-**Shared machines.** On WSL, a Windows profile is auto-detected only when
-exactly one has transcripts. If several do, none is indexed — pulling a
-colleague's or family member's conversations into your index would be worse than
-indexing nothing. Name the one you want with `AGENT_HISTORY_EXTRA_DIRS`.
+Deliberately out of scope: AI summarization and knowledge graphs. If you want
+compressed, curated memory, run a tool that does that — the two approaches
+compose fine, and this one guarantees the source material survives.
 
 ## Roadmap
 
 The original roadmap — adapters for every agent found on this machine — is
-complete: Codex, OpenCode, Hermes, and OpenClaw all shipped in 0.6–0.7,
-followed by hybrid search, the viewer, context injection, docs trees, and
-refresh-on-change. What remains is driven by use:
+complete. What remains is driven by use:
 
 - [ ] An approximate vector index if a corpus outgrows exhaustive kNN
   (hundreds of thousands of chunks — remote for a personal index)
@@ -566,14 +619,7 @@ refresh-on-change. What remains is driven by use:
 
 Adding an agent means writing a single module in
 `src/agent_history/adapters/` that yields `Record`s. The indexer and search
-layer don't change. The SQLite-backed
-adapters open their source read-only and select named columns only — agent
-databases keep OAuth tokens and system prompts in neighbouring tables and
-columns, and `SELECT *` is how those would end up in a search index.
-
-Deliberately out of scope: AI summarization, auto-injection into new sessions,
-and knowledge graphs. Tools like claude-mem do that well; this tool's value is
-the opposite trade — the original words, kept verbatim, at zero ongoing cost.
+layer don't change.
 
 ## Development
 
@@ -582,11 +628,10 @@ $ uv sync --group dev
 $ uv run pytest                 # no Ollama required
 ```
 
-The embedder is stubbed in tests, so the suite is fast and hermetic — it never
-touches a real index and never needs a model. CI runs it on Python 3.10–3.13
-across Ubuntu and macOS, which is what keeps the macOS claims honest: that
-platform ships bash 3.2 and lacks `setsid`, so the scripts are checked against
-both.
+The embedder is stubbed in tests, so the suite is fast and hermetic — it
+never touches a real index and never needs a model. CI runs it on Python
+3.10–3.13 across Ubuntu, macOS and Windows, which is what keeps the platform
+claims honest.
 
 Keeping an installation current:
 
@@ -595,19 +640,20 @@ $ ./scripts/sync-local.sh --check   # report drift, change nothing
 $ ./scripts/sync-local.sh           # pull, reinstall what changed, run doctor
 ```
 
-The checkout, the `uv tool` CLI, and the plugin drift independently and nothing
-reconciles them on its own — an out-of-date CLI is easy to miss because it keeps
-working.
+The checkout, the `uv tool` CLI, and the plugin drift independently and
+nothing reconciles them on its own — an out-of-date CLI is easy to miss
+because it keeps working.
 
 ## Known limitations
 
-- Deleting a transcript leaves its chunks in the index — usually what you want
-  (see [`reindex` is destructive](#reindex-is-destructive)), but it means `--cwd`
+- Deleting a transcript leaves its chunks in the index — usually the point
+  (see [above](#your-index-outlives-the-transcripts)), but it means `--cwd`
   filters can surface paths that no longer exist.
-- The first index of a large corpus is slow — see [What it costs](#what-it-costs).
-  It is a one-time cost; every run after it is incremental.
-- Search quality is bounded by the embedding model. `nomic-embed-text` is a good
-  default; `mxbai-embed-large` is slower and somewhat better.
+- The first index of a large corpus is slow — see
+  [What it costs](#what-it-costs). It is a one-time cost.
+- Search quality is bounded by the embedding model. `nomic-embed-text` is a
+  good default; `mxbai-embed-large` is slower and somewhat better. Changing
+  models is a `reembed` away and loses nothing.
 
 ## Contributing
 
@@ -623,8 +669,8 @@ $ gh pr create
 
 Merging a version bump to `main` tags it and publishes a GitHub release
 automatically, using that version's `CHANGELOG.md` entry as the notes. Merges
-that don't touch the version are silent. Keep `pyproject.toml`,
-`plugin.json` and `__init__.py` in agreement — CI fails if they drift.
+that don't touch the version are silent. Keep `pyproject.toml`, `plugin.json`
+and `__init__.py` in agreement — CI fails if they drift.
 
 ## Contact
 
