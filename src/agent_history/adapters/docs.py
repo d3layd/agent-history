@@ -52,13 +52,20 @@ class DocsAdapter:
 
     def records(self) -> Iterator[Record]:
         for root in self.roots():
-            for path in _walk(root):
+            for path in _eligible_files(root):
                 yield from self._read_doc(root, path)
+
+    def watch_files(self) -> Iterator[Path]:
+        """Files whose mtimes decide `trigger --if-changed`.
+
+        The same pruned, filtered set that records() reads — so a touched
+        node_modules readme or an oversized log can never wake the indexer.
+        """
+        for root in self.roots():
+            yield from _eligible_files(root)
 
     def _read_doc(self, root: Path, path: Path) -> Iterator[Record]:
         try:
-            if path.stat().st_size > MAX_FILE_BYTES:
-                return
             text = path.read_text(encoding="utf-8", errors="replace").strip()
             mtime = path.stat().st_mtime
         except OSError:
@@ -68,12 +75,32 @@ class DocsAdapter:
         yield Record(
             agent=AGENT,
             origin=str(path),
-            session_id=f"doc:{path.relative_to(root)}",
+            # as_posix() keeps the identifier stable across platforms.
+            session_id=f"doc:{path.relative_to(root).as_posix()}",
             cwd=str(root),
             timestamp=datetime.datetime.fromtimestamp(mtime).isoformat(),
             role="doc",
             text=scrub(text),
         )
+
+
+def _eligible_files(root: Path) -> Iterator[Path]:
+    """Documents under `root` that may be read: pruned, sized, and contained.
+
+    A symbolic link inside the root can target a sensitive file outside it;
+    following it would copy that file into the index. Resolved targets must
+    stay under the resolved root.
+    """
+    resolved_root = root.resolve()
+    for path in _walk(root):
+        try:
+            if path.stat().st_size > MAX_FILE_BYTES:
+                continue
+            if not path.resolve().is_relative_to(resolved_root):
+                continue
+        except OSError:
+            continue
+        yield path
 
 
 def _walk(root: Path) -> Iterator[Path]:

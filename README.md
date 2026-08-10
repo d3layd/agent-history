@@ -172,6 +172,9 @@ $ AGENT_HISTORY_DOCS_DIRS=~/ops-library:~/notes agent-history index
 $ agent-history search "gateway restart runbook" --agent docs
 ```
 
+(Unix shell shown; on Windows separate roots with `;` and set the variable
+with your shell's syntax, e.g. `$env:AGENT_HISTORY_DOCS_DIRS` in PowerShell.)
+
 (Export the variable persistently for the hooks to pick it up.) This is
 opt-in only — nothing is auto-detected. Markdown and `.txt` files are
 indexed recursively; vendored and hidden directories (`node_modules`,

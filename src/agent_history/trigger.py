@@ -111,6 +111,18 @@ def _anything_changed(stamp: Path) -> bool:
     from . import adapters
 
     for adapter in adapters.available_adapters():
+        # An adapter that knows its own eligible file set (pruned vendored
+        # dirs, size caps) names it via watch_files(), so an ineligible file
+        # changing can never wake the indexer.
+        watch = getattr(adapter, "watch_files", None)
+        if callable(watch):
+            for path in watch():
+                try:
+                    if path.stat().st_mtime > since:
+                        return True
+                except OSError:
+                    continue
+            continue
         for root in adapter.roots():
             # Database-backed adapters return the file itself. SQLite in WAL
             # mode writes the -wal first, so check the sidecars too.
@@ -122,10 +134,6 @@ def _anything_changed(stamp: Path) -> bool:
                     except OSError:
                         continue
                 continue
-            # NOTE: this rglob does not prune vendored dirs the way the docs
-            # adapter's walk does — a docs root containing node_modules pays a
-            # full traversal here each poll. Adapter-aware change detection is
-            # the eventual fix.
             for pattern in ("*.jsonl", "*.md", "*.txt"):
                 for path in root.rglob(pattern):
                     try:

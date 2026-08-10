@@ -88,12 +88,58 @@ def test_multiple_roots_via_pathsep(docs, isolated_env, monkeypatch):
     assert "first root" in texts and "second root" in texts
 
 
-def test_session_id_is_the_relative_path(docs):
-    from pathlib import Path
-
+def test_session_id_is_the_posix_relative_path(docs):
     docs("memory/credentials/ondeck.md",
          "Portal notes that need a stable identifier.")
-    assert records()[0].session_id == f"doc:{Path('memory/credentials/ondeck.md')}"
+    # Literal on purpose: the identifier must not vary with the platform's
+    # path separator.
+    assert records()[0].session_id == "doc:memory/credentials/ondeck.md"
+
+
+@pytest.mark.skipif(os.name == "nt",
+                    reason="creating symlinks on Windows requires privileges")
+def test_symlink_escaping_the_root_is_not_read(docs, isolated_env):
+    outside = isolated_env / "outside-secret.md"
+    outside.write_text("Sensitive content that lives outside the docs root.")
+    (docs.root / "innocent-looking.md").symlink_to(outside)
+    docs("real.md", "An ordinary document inside the configured root.")
+    got = records()
+    assert len(got) == 1
+    assert "Sensitive" not in got[0].text
+
+
+@pytest.mark.skipif(os.name == "nt",
+                    reason="creating symlinks on Windows requires privileges")
+def test_symlink_within_the_root_is_allowed(docs):
+    target = docs("actual/runbook.md", "The runbook content, linked from the top.")
+    (docs.root / "runbook-link.md").symlink_to(target)
+    texts = [r.text for r in records()]
+    # Both paths resolve inside the root; content dedup collapses the chunks
+    # at index time, so yielding twice here is fine.
+    assert all("runbook content" in t for t in texts)
+
+
+def test_trigger_ignores_pruned_and_oversized_changes(docs, isolated_env):
+    import os as _os
+    import time
+
+    from agent_history import trigger
+
+    docs("real.md", "An eligible document that participates in change detection.")
+    stamp = isolated_env / "stamp"
+    stamp.touch()
+    future = time.time() + 60
+
+    vendored = docs("node_modules/pkg/README.md", "Vendored readme, ineligible.")
+    _os.utime(vendored, (future, future))
+    oversized = docs("dump.txt", "x" * (MAX_FILE_BYTES + 1))
+    _os.utime(oversized, (future, future))
+    assert trigger._anything_changed(stamp) is False, \
+        "ineligible files must never wake the indexer"
+
+    eligible = docs("real.md", "The eligible document, freshly edited.")
+    _os.utime(eligible, (future, future))
+    assert trigger._anything_changed(stamp) is True
 
 
 def test_missing_root_is_not_an_error(isolated_env, monkeypatch):
