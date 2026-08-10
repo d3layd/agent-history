@@ -217,7 +217,7 @@ Because it's local, free, and precision-gated, it's **on by default**. Each
 time it fires you see a notice listing exactly which memories were pulled —
 one line per chunk with its date, source, project, and a snippet:
 
-```
+```text
 📚 agent-history recalled 3 memories  ·  /history:inject to toggle
   · 2026-07-08 claude-code/assistant xiu — Fixed and deployed — restart the app…
   · 2026-08-06 claude-code/assistant agent-history — README rewrite for the archive…
