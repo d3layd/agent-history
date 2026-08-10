@@ -151,6 +151,41 @@ def open_for_read(check_model: bool = True) -> sqlite3.Connection:
     return db
 
 
+def open_for_maintenance() -> sqlite3.Connection:
+    """Open the index with no model-identity check.
+
+    For operations that work on stored text or vectors regardless of which
+    model produced them — re-embedding foremost.
+    """
+    path = config.db_path()
+    if not path.exists():
+        raise StoreError(f"no index at {path}. Run: agent-history index")
+    return _raw_connect(path)
+
+
+def orphaned_counts(db: sqlite3.Connection) -> tuple[int, int]:
+    """(chunks, origins) whose source no longer exists on disk.
+
+    These chunks are the ones `reindex` would destroy irrecoverably — the
+    index is their only surviving copy. `db:<path>#<table>` origins are
+    checked against the database file path inside them.
+    """
+    from pathlib import Path
+
+    rows = db.execute(
+        "SELECT origin, count(*) FROM chunks GROUP BY origin"
+    ).fetchall()
+    chunks = origins = 0
+    for origin, count in rows:
+        path = origin
+        if origin.startswith("db:"):
+            path = origin[3:].split("#", 1)[0]
+        if not Path(path).exists():
+            origins += 1
+            chunks += count
+    return chunks, origins
+
+
 def reset() -> None:
     """Delete the index outright, so a rebuild starts from nothing.
 
@@ -179,8 +214,10 @@ def reset() -> None:
             try:
                 db.execute("DELETE FROM chunks")
                 db.execute("DROP TABLE IF EXISTS vec_chunks")
+                db.execute("DROP TABLE IF EXISTS vec_chunks_new")
                 db.execute("DROP TABLE IF EXISTS fts_chunks")
-                db.execute("DELETE FROM meta WHERE key IN ('model', 'dimension')")
+                db.execute("DELETE FROM meta WHERE key IN "
+                           "('model', 'dimension', 'reembed_model')")
                 db.commit()
             finally:
                 db.close()

@@ -9,6 +9,30 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.10.0] — 2026-08-10
+
+### Added
+- **`agent-history reembed`** — switch embedding models **without losing
+  anything**. The chunk text lives in the index, so a model change never
+  needed the source transcripts: every stored chunk is re-embedded with the
+  configured model, staged alongside the old vectors (searches keep working
+  throughout), and swapped in atomically at the end. Interrupted by a crash
+  or an Ollama outage, it resumes where it stopped; a staging run for a
+  different model is discarded and restarted. It holds the indexing lock for
+  the duration, so a hook firing mid-run cannot insert vectors the swap
+  would discard.
+- **`reindex` now refuses to destroy orphaned history.** When chunks exist
+  whose source files are gone — for a mature index, most of it — a wipe
+  discards the only surviving copy. `reindex` counts them, refuses, and
+  points at `reembed`; `--force` overrides. It also fails closed when the
+  index exists but cannot be opened: an index this Python cannot rebuild is
+  one it must not delete.
+
+### Changed
+- README rewritten as one coherent document: supported sources up front,
+  quickstart, full command reference, and the `index`/`reembed`/`reindex`
+  triad replacing the old "reindex is destructive" guidance.
+
 ## [0.9.0] — 2026-08-10
 
 ### Added

@@ -8,8 +8,8 @@ import sys
 from . import (__version__, adapters, config, embed, index, inject, search,
                show, store, trigger, viewer)
 
-COMMANDS = {"index", "reindex", "search", "sources", "doctor", "datadir",
-            "trigger", "show", "serve", "inject", "docs"}
+COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
+            "datadir", "trigger", "show", "serve", "inject", "docs"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -23,7 +23,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("index", help="incrementally update the index")
-    sub.add_parser("reindex", help="wipe and rebuild the index")
+    re_ix = sub.add_parser(
+        "reindex", help="wipe and rebuild from what is on disk (destructive)")
+    re_ix.add_argument("--force", action="store_true",
+                       help="discard chunks whose source files are gone")
+    sub.add_parser(
+        "reembed",
+        help="re-embed every stored chunk with the configured model — "
+             "keeps all history, unlike reindex")
     sub.add_parser("sources", help="print the directories that will be scanned")
     sub.add_parser("datadir", help="print the data directory (index, log, lock)")
     sub.add_parser("doctor", help="diagnose the installation")
@@ -238,7 +245,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "index":
             return index.run()
         if args.command == "reindex":
-            return index.run(reindex=True)
+            return index.run(reindex=True, force=args.force)
+        if args.command == "reembed":
+            return index.run_reembed()
         if args.command == "sources":
             return _cmd_sources()
         if args.command == "trigger":
