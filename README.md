@@ -162,6 +162,21 @@ the transcript often no longer exists (see below). The viewer serves the same
 search and conversation views in a browser, binds strictly to loopback, and
 has no flag to change that.
 
+### Indexing documentation trees
+
+Transcripts answer "what was said"; a docs tree answers "what was written
+down". Name your documentation roots and both land in the same index:
+
+```console
+$ AGENT_HISTORY_DOCS_DIRS=~/ops-library:~/notes agent-history index
+$ agent-history search "gateway restart runbook" --agent docs
+```
+
+(Export the variable persistently for the hooks to pick it up.) This is
+opt-in only — nothing is auto-detected. Markdown and `.txt` files are
+indexed recursively; vendored and hidden directories (`node_modules`,
+`.git`, …) are pruned, and files over 2MB are treated as logs and skipped.
+
 Start with `doctor` if anything misbehaves — it reports whether Ollama is
 reachable, whether the model is pulled, what was detected, and how much is
 indexed.

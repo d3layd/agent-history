@@ -122,7 +122,7 @@ def _anything_changed(stamp: Path) -> bool:
                     except OSError:
                         continue
                 continue
-            for pattern in ("*.jsonl", "*.md"):
+            for pattern in ("*.jsonl", "*.md", "*.txt"):
                 for path in root.rglob(pattern):
                     try:
                         if path.stat().st_mtime > since:
