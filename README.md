@@ -170,6 +170,7 @@ $ agent-history search "query" --cwd myapp  # only sessions from a directory
 $ agent-history search "query" --agent codex   # one source only
 $ agent-history search "query" --mode text  # exact match, no Ollama needed
 $ agent-history search "query" --mode vector   # embeddings only
+$ agent-history search "query" --sort newest   # chronological, not relevance
 $ agent-history search "query" --json       # machine-readable
 $ agent-history "query"                     # `search` is the default
 
@@ -187,7 +188,12 @@ $ agent-history sources                     # what will be scanned
 $ agent-history doctor                      # diagnose the installation
 ```
 
-A search hit is a chunk; `show` prints the conversation it came from. Start
+A search hit is a chunk; `show` prints the conversation it came from.
+Relevance ranking has a mild recency preference: results whose scores are
+effectively tied go to the newer chunk, so superseded information only
+outranks its own correction when relevance genuinely separates them.
+`--sort newest` (also a dropdown in the viewer) orders results
+chronologically instead — useful for "what's the latest on X". Start
 with `doctor` if anything misbehaves — it reports whether Ollama is reachable,
 what was detected, how much is indexed, and flags misconfigured docs roots.
 

@@ -84,13 +84,18 @@ PAGE = """<!doctype html>
   <h1>agent-history <span id="stats"></span></h1>
   <form id="f">
     <input id="q" placeholder="what did we decide about ..." autofocus>
-    <select id="mode">
+    <select id="mode" aria-label="search mode">
       <option value="hybrid">hybrid</option>
       <option value="vector">vector</option>
       <option value="text">text</option>
     </select>
-    <select id="agent"><option value="">all agents</option></select>
-    <input id="cwd" placeholder="cwd filter" style="flex:0 1 10rem">
+    <select id="sort" aria-label="result order">
+      <option value="relevance">relevance</option>
+      <option value="newest">newest</option>
+    </select>
+    <select id="agent" aria-label="agent filter"><option value="">all agents</option></select>
+    <input id="cwd" placeholder="cwd filter" aria-label="cwd filter"
+           style="flex:0 1 10rem">
     <button>search</button>
   </form>
   <div id="status"></div>
@@ -115,7 +120,8 @@ $('f').addEventListener('submit', async ev => {
   if (!q) return;
   $('status').textContent = 'searching…';
   $('results').textContent = '';
-  const params = new URLSearchParams({q, mode: $('mode').value, k: '20'});
+  const params = new URLSearchParams({q, mode: $('mode').value,
+                                      sort: $('sort').value, k: '20'});
   if ($('agent').value) params.set('agent', $('agent').value);
   if ($('cwd').value) params.set('cwd', $('cwd').value);
   try {
@@ -209,6 +215,7 @@ class Handler(BaseHTTPRequestHandler):
                     cwd=params.get("cwd") or None,
                     agent=params.get("agent") or None,
                     mode=params.get("mode", "hybrid"),
+                    sort=params.get("sort", "relevance"),
                 ))
             elif parsed.path == "/api/session":
                 target = params.get("session") or params.get("origin") or ""

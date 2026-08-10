@@ -51,6 +51,8 @@ def _build_parser() -> argparse.ArgumentParser:
     find.add_argument("--agent", help="filter by agent, e.g. claude-code")
     find.add_argument("--mode", choices=search.MODES, default="hybrid",
                       help="hybrid (default), vector, or text (no Ollama needed)")
+    find.add_argument("--sort", choices=search.SORTS, default="relevance",
+                      help="relevance (default; near-ties favour newer) or newest")
     find.add_argument("--full", action="store_true", help="print full chunk text")
     find.add_argument("--json", action="store_true", dest="as_json")
 
@@ -265,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 agent=args.agent,
                 mode=args.mode,
+                sort=args.sort,
                 full=args.full,
                 as_json=args.as_json,
             )

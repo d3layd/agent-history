@@ -12,6 +12,7 @@ Three modes:
 """
 from __future__ import annotations
 
+import datetime
 import json
 import sys
 
@@ -21,6 +22,13 @@ PREVIEW_CHARS = 600
 JSON_PREVIEW_CHARS = 500
 
 MODES = ("hybrid", "vector", "text")
+SORTS = ("relevance", "newest")
+
+# Scores within a rounding bucket are treated as tied, and ties go to the
+# newer chunk — so superseded information only outranks its correction when
+# relevance genuinely separates them. Deliberately mild: no decay curves.
+SCORE_TIE_DECIMALS = 4      # RRF scores (~0.016-0.033)
+DISTANCE_TIE_DECIMALS = 1   # L2 distances (~14-20)
 
 
 def search_rows(
@@ -30,6 +38,7 @@ def search_rows(
     cwd: str | None = None,
     agent: str | None = None,
     mode: str = "hybrid",
+    sort: str = "relevance",
 ) -> list[dict]:
     """Run one search and return result dicts — shared by the CLI and viewer."""
     db = store.open_for_read(check_model=(mode != "text"))
@@ -58,7 +67,50 @@ def search_rows(
             else:
                 rows = store.hybrid_query(db, vector, query, k, **narrowing)
 
-    return [_as_dict(row) for row in rows]
+    return _order([_as_dict(row) for row in rows], sort)
+
+
+def _order(results: list[dict], sort: str) -> list[dict]:
+    """Order results: newest-first, or relevance with a recency tiebreak.
+
+    Timestamps are normalised before comparison: adapters store a mix of
+    UTC-suffixed and local-naive ISO strings, and comparing those
+    lexicographically can misorder by the UTC offset. Naive values are
+    taken as local time (that is how they were generated); unparseable or
+    empty ones sort last.
+    """
+    def when(r: dict) -> float:
+        return _instant(r.get("timestamp") or "")
+
+    if sort == "newest":
+        return sorted(results, key=when, reverse=True)
+
+    if not any(r.get("score") is not None or r.get("distance") is not None
+               for r in results):
+        return results  # pure text mode: BM25 order is the relevance order
+
+    def rank(r: dict):
+        if r.get("score") is not None:
+            return -round(r["score"], SCORE_TIE_DECIMALS)
+        return round(r["distance"], DISTANCE_TIE_DECIMALS)
+
+    # Two-pass stable sort: newest-first first, then by bucketed relevance —
+    # equal buckets keep the newer row in front.
+    newest_first = sorted(results, key=when, reverse=True)
+    return sorted(newest_first, key=rank)
+
+
+def _instant(timestamp: str) -> float:
+    """A comparable epoch for an ISO timestamp of any stored flavour."""
+    if not timestamp:
+        return float("-inf")
+    try:
+        parsed = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()  # naive values were written in local time
+    return parsed.timestamp()
 
 
 def run(
@@ -68,10 +120,11 @@ def run(
     cwd: str | None = None,
     agent: str | None = None,
     mode: str = "hybrid",
+    sort: str = "relevance",
     full: bool = False,
     as_json: bool = False,
 ) -> int:
-    results = search_rows(query, k=k, cwd=cwd, agent=agent, mode=mode)
+    results = search_rows(query, k=k, cwd=cwd, agent=agent, mode=mode, sort=sort)
 
     if as_json:
         print(json.dumps([_trim(dict(r), full) for r in results], indent=2))

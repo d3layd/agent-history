@@ -9,6 +9,18 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.11.0] — 2026-08-10
+
+### Added
+- **Recency-aware results.** Relevance ranking now breaks near-ties toward
+  the newer chunk (scores compared in rounded buckets — deliberately mild,
+  no decay curves to miscalibrate), so a superseded answer only outranks
+  its own correction when relevance genuinely separates them. And both the
+  CLI (`--sort newest`) and the viewer (a sort dropdown) can order results
+  chronologically outright — for "what's the latest on X" rather than
+  "what's the best match for X". Pure text-mode results keep exact BM25
+  order under relevance sort.
+
 ## [0.10.0] — 2026-08-10
 
 ### Added
