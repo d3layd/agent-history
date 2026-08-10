@@ -201,14 +201,37 @@ def openclaw_dirs() -> list[Path]:
     return [Path.home() / ".openclaw"]
 
 
+def docs_dirs_file() -> Path:
+    """Persisted docs roots, one per line — managed by `agent-history docs`.
+
+    Hook processes do not reliably inherit shell exports (Windows
+    especially), so a file in the data directory is the sturdier home for
+    this setting; the env var still works and is merged in first.
+    """
+    return data_home() / "docs-dirs"
+
+
 def docs_dirs() -> list[Path]:
     """Documentation trees to index — opt-in only, nothing is auto-detected.
 
     A docs tree could live anywhere, and guessing would mean reading
-    directories the user never offered. os.pathsep-separated.
+    directories the user never offered. Union of $AGENT_HISTORY_DOCS_DIRS
+    (os.pathsep-separated) and the roots added with `agent-history docs add`.
     """
     raw = _env("AGENT_HISTORY_DOCS_DIRS", "")
-    return [Path(p).expanduser() for p in raw.split(os.pathsep) if p.strip()]
+    dirs = [Path(p).expanduser() for p in raw.split(os.pathsep) if p.strip()]
+    try:
+        lines = docs_dirs_file().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    dirs += [Path(line).expanduser() for line in lines if line.strip()]
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
 
 
 def extra_dirs() -> list[Path]:

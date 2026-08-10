@@ -379,6 +379,49 @@ def session_rows(
     ).fetchall()
 
 
+def remove_stale(
+    db: sqlite3.Connection,
+    targets: list[tuple[str, str]],
+    keep: set[str],
+) -> int:
+    """Delete chunks of mutable origins whose text no longer exists.
+
+    This is the store's only delete path, and it is deliberately narrow:
+    `targets` is the (agent, origin) list of mutable sources scanned in the
+    current run, and `keep` is every content hash any adapter produced this
+    run. A row is removed only when its origin was re-read AND its text was
+    produced by nothing at all — so transcript chunks (never in `targets`)
+    are untouchable, an origin that vanished from disk keeps its chunks, and
+    a hash shared with any other source survives even if this origin dropped
+    it.
+    """
+    removed = 0
+    fts = fts_enabled(db)
+    for agent, origin in targets:
+        rows = db.execute(
+            "SELECT id, content_hash, text FROM chunks "
+            "WHERE agent = ? AND origin = ?",
+            (agent, origin),
+        ).fetchall()
+        for rowid, digest, text in rows:
+            if digest in keep:
+                continue
+            db.execute("DELETE FROM chunks WHERE id = ?", (rowid,))
+            db.execute("DELETE FROM vec_chunks WHERE rowid = ?", (rowid,))
+            if fts:
+                # External-content FTS5 cannot look up the deleted row's
+                # text itself; the 'delete' command must be handed it.
+                db.execute(
+                    "INSERT INTO fts_chunks(fts_chunks, rowid, text) "
+                    "VALUES('delete', ?, ?)",
+                    (rowid, text),
+                )
+            removed += 1
+    if removed:
+        db.commit()
+    return removed
+
+
 def stats(db: sqlite3.Connection) -> dict:
     total = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
     per_agent = dict(

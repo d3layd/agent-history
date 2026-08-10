@@ -16,21 +16,40 @@ from .textproc import chunk_text
 COMMIT_EVERY = 16
 
 
-def _pending(seen: set[str]) -> list[tuple[adapters.Record, str, str]]:
-    """Collect (record, chunk_text, hash) for everything not yet indexed."""
+def _pending(
+    seen: set[str],
+) -> tuple[list[tuple[adapters.Record, str, str]], set[str], list[tuple[str, str]]]:
+    """Collect what needs indexing, and what mutable sources currently hold.
+
+    Returns (new chunks to embed, every hash produced this run, the
+    (agent, origin) pairs of mutable sources that were scanned). The latter
+    two feed stale-chunk removal: only re-read mutable origins are eligible,
+    and nothing produced this run may be deleted.
+    """
     out: list[tuple[adapters.Record, str, str]] = []
+    produced: set[str] = set()
+    mutable_targets: set[tuple[str, str]] = set()
     for adapter in adapters.available_adapters():
         count = 0
         for record in adapter.records():
             for piece in chunk_text(record.text):
                 digest = hashlib.sha256(piece.encode("utf-8")).hexdigest()
+                produced.add(digest)
                 if digest in seen:
                     continue
                 seen.add(digest)
                 out.append((record, piece, digest))
                 count += 1
+        if getattr(adapter, "mutable", False):
+            # Eligibility comes from what was read, not what was yielded —
+            # a doc shrunk below the indexing minimum yields no records but
+            # must still have its stale chunks refreshed.
+            mutable_targets.update(
+                (adapter.name, origin)
+                for origin in getattr(adapter, "scanned", ())
+            )
         print(f"  {adapter.name}: {count} new chunk(s)")
-    return out
+    return out, produced, sorted(mutable_targets)
 
 
 def run(reindex: bool = False) -> int:
@@ -52,7 +71,15 @@ def run(reindex: bool = False) -> int:
     seen = store.existing_hashes(db)
     print(f"Already indexed: {len(seen)} chunk(s)")
 
-    pending = _pending(seen)
+    pending, produced, mutable_targets = _pending(seen)
+
+    # Mutable sources (docs) are refreshed before the early return: an edit
+    # that only removes text produces no new chunks but still leaves stale
+    # ones to clear.
+    stale = store.remove_stale(db, mutable_targets, keep=produced)
+    if stale:
+        print(f"docs refresh: removed {stale} stale chunk(s)")
+
     if not pending:
         print("Up to date.")
         return 0

@@ -43,6 +43,10 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 
 class DocsAdapter:
     name = AGENT
+    # Docs are the store's one mutable source: files get edited, and their
+    # old chunks must be refreshed away rather than accumulate. Transcript
+    # adapters are append-only and never set this.
+    mutable = True
 
     def roots(self) -> list[Path]:
         return [d for d in config.docs_dirs() if d.is_dir()]
@@ -51,8 +55,14 @@ class DocsAdapter:
         return bool(self.roots())
 
     def records(self) -> Iterator[Record]:
+        # `scanned` is every origin whose text was actually read this pass —
+        # the refresh eligibility set. It must not be derived from yielded
+        # records: a file shrunk below MIN_CHARS yields nothing but was
+        # still read, and its old chunks must still be refreshed away.
+        self.scanned: set[str] = set()
         for root in self.roots():
             for path in _eligible_files(root):
+                self.scanned.add(str(path))
                 yield from self._read_doc(root, path)
 
     def watch_files(self) -> Iterator[Path]:

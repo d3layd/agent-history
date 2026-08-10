@@ -9,7 +9,7 @@ from . import (__version__, adapters, config, embed, index, inject, search,
                show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "search", "sources", "doctor", "datadir",
-            "trigger", "show", "serve", "inject"}
+            "trigger", "show", "serve", "inject", "docs"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -68,6 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
     inj.add_argument("action", nargs="?", default="status",
                      choices=["on", "off", "status", "run"],
                      help="'run' is the hook entry point and reads stdin")
+
+    doc = sub.add_parser(
+        "docs", help="manage documentation roots to index (persisted)")
+    doc.add_argument("action", nargs="?", default="list",
+                     choices=["add", "remove", "list"])
+    doc.add_argument("path", nargs="?", help="directory, for add/remove")
     return parser
 
 
@@ -90,6 +96,72 @@ def _cmd_sources() -> int:
     for adapter in adapters.available_adapters():
         for root in adapter.roots():
             print(root)
+    return 0
+
+
+def _cmd_docs(action: str, path: str | None) -> int:
+    from pathlib import Path
+
+    listing = config.docs_dirs_file()
+
+    def stored() -> list[str]:
+        try:
+            return [line for line in
+                    listing.read_text(encoding="utf-8").splitlines()
+                    if line.strip()]
+        except OSError:
+            return []
+
+    if action in ("add", "remove") and not path:
+        print(f"error: docs {action} needs a directory path", file=sys.stderr)
+        return 1
+
+    if action == "add":
+        target = Path(path).expanduser().resolve()
+        if not target.is_dir():
+            print(f"error: not a directory: {target}", file=sys.stderr)
+            return 1
+        lines = stored()
+        if str(target) in lines:
+            print(f"already added: {target}")
+            return 0
+        config.ensure_data_home()
+        listing.write_text("\n".join([*lines, str(target)]) + "\n",
+                           encoding="utf-8")
+        config.secure_file(listing)
+        print(f"added: {target}")
+        print("run `agent-history index` (or wait for the next hook) to index it")
+        return 0
+
+    if action == "remove":
+        target = str(Path(path).expanduser().resolve())
+        lines = stored()
+        if target not in lines:
+            print(f"not in the persisted list: {target}", file=sys.stderr)
+            if any(str(d) == target for d in config.docs_dirs()):
+                print("(it comes from $AGENT_HISTORY_DOCS_DIRS — unset it there)",
+                      file=sys.stderr)
+            return 1
+        remaining = [line for line in lines if line != target]
+        config.ensure_data_home()
+        listing.write_text(
+            "".join(f"{line}\n" for line in remaining), encoding="utf-8")
+        config.secure_file(listing)
+        print(f"removed: {target}")
+        print("already-indexed chunks remain until the file's next edit "
+              "refreshes them or a `reindex`")
+        return 0
+
+    roots = config.docs_dirs()
+    if not roots:
+        print("no docs roots configured — add one with: "
+              "agent-history docs add <dir>")
+        return 0
+    persisted = set(stored())
+    for root in roots:
+        source = "persisted" if str(root) in persisted else "env"
+        state = "" if root.is_dir() else "  (MISSING)"
+        print(f"{root}  [{source}]{state}")
     return 0
 
 
@@ -198,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.action in ("on", "off"):
                 return inject.set_enabled(args.action == "on")
             return inject.status()
+        if args.command == "docs":
+            return _cmd_docs(args.action, args.path)
     except (store.StoreError, embed.EmbedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
