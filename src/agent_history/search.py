@@ -12,6 +12,7 @@ Three modes:
 """
 from __future__ import annotations
 
+import datetime
 import json
 import sys
 
@@ -72,11 +73,14 @@ def search_rows(
 def _order(results: list[dict], sort: str) -> list[dict]:
     """Order results: newest-first, or relevance with a recency tiebreak.
 
-    ISO 8601 timestamps compare lexicographically, so string comparison is
-    chronological; empty timestamps sort last either way.
+    Timestamps are normalised before comparison: adapters store a mix of
+    UTC-suffixed and local-naive ISO strings, and comparing those
+    lexicographically can misorder by the UTC offset. Naive values are
+    taken as local time (that is how they were generated); unparseable or
+    empty ones sort last.
     """
-    def when(r: dict) -> str:
-        return r.get("timestamp") or ""
+    def when(r: dict) -> float:
+        return _instant(r.get("timestamp") or "")
 
     if sort == "newest":
         return sorted(results, key=when, reverse=True)
@@ -94,6 +98,19 @@ def _order(results: list[dict], sort: str) -> list[dict]:
     # equal buckets keep the newer row in front.
     newest_first = sorted(results, key=when, reverse=True)
     return sorted(newest_first, key=rank)
+
+
+def _instant(timestamp: str) -> float:
+    """A comparable epoch for an ISO timestamp of any stored flavour."""
+    if not timestamp:
+        return float("-inf")
+    try:
+        parsed = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()  # naive values were written in local time
+    return parsed.timestamp()
 
 
 def run(

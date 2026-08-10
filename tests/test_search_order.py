@@ -57,6 +57,24 @@ def test_pure_text_mode_preserves_bm25_order():
     assert texts(_order(rows, "newest")) == ["bm25 second", "bm25 first"]
 
 
+def test_mixed_utc_offsets_compare_chronologically():
+    """String comparison would misorder these: '02:00Z' < '06:00+05:00'
+    lexicographically, but 06:00+05:00 IS 01:00Z — the Z one is newer."""
+    got = _order([
+        hit("actually older", "2026-08-10T06:00:00+05:00", score=0.01),
+        hit("actually newer", "2026-08-10T02:00:00Z", score=0.02),
+    ], "newest")
+    assert texts(got) == ["actually newer", "actually older"]
+
+
+def test_unparseable_timestamps_sort_last():
+    got = _order([
+        hit("garbage stamp", "not-a-date", score=0.03),
+        hit("dated", "2026-08-01T00:00:00Z", score=0.01),
+    ], "newest")
+    assert texts(got) == ["dated", "garbage stamp"]
+
+
 def test_missing_timestamps_sort_last_in_newest():
     got = _order([
         hit("undated", "", score=0.03),

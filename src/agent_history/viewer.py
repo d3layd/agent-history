@@ -84,17 +84,18 @@ PAGE = """<!doctype html>
   <h1>agent-history <span id="stats"></span></h1>
   <form id="f">
     <input id="q" placeholder="what did we decide about ..." autofocus>
-    <select id="mode">
+    <select id="mode" aria-label="search mode">
       <option value="hybrid">hybrid</option>
       <option value="vector">vector</option>
       <option value="text">text</option>
     </select>
-    <select id="sort">
+    <select id="sort" aria-label="result order">
       <option value="relevance">relevance</option>
       <option value="newest">newest</option>
     </select>
-    <select id="agent"><option value="">all agents</option></select>
-    <input id="cwd" placeholder="cwd filter" style="flex:0 1 10rem">
+    <select id="agent" aria-label="agent filter"><option value="">all agents</option></select>
+    <input id="cwd" placeholder="cwd filter" aria-label="cwd filter"
+           style="flex:0 1 10rem">
     <button>search</button>
   </form>
   <div id="status"></div>
