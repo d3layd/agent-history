@@ -99,15 +99,14 @@ def _run(stream) -> int:
     except embed.EmbedError:
         return 0
     cutoff = config.inject_max_distance()
+    cross = config.inject_cross_distance()
     session = payload.get("session_id") or ""
-    # Strict mode scopes recall to the current project, so a chunk from
-    # another client/project can never ride into this prompt.
-    project = (payload.get("cwd") or "") if config.strict_enabled() else None
+    scope = payload.get("cwd") or ""          # working directory of this prompt
+    strict = config.strict_enabled()
 
     rows = [
         r for r in store.query(db, vector, FETCH)
-        if r[7] <= cutoff and r[2] != session
-        and (project is None or r[3] == project)
+        if r[2] != session and _in_scope(r, scope, cutoff, cross, strict)
     ]
     picked = _dedupe(rows)[:MAX_CHUNKS]
     if not picked:
@@ -137,6 +136,37 @@ def _system_message(rows: list[tuple]) -> str:
         snippet = " ".join(text.split())[:SNIPPET_CHARS]
         lines.append(f"  · {when} {agent}/{role} {where} — {snippet}")
     return "\n".join(lines)
+
+
+def _same_scope(chunk_cwd: str, scope: str) -> bool:
+    """Whether a chunk belongs to the current directory/project.
+
+    A prefix match either way, so a repo root and its subdirectories count as
+    one project (`/repo` ~ `/repo/tests`). Both must be non-empty.
+    """
+    if not chunk_cwd or not scope:
+        return False
+    a = chunk_cwd.rstrip("/")
+    b = scope.rstrip("/")
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def _in_scope(row, scope: str, cutoff: float, cross: float, strict: bool) -> bool:
+    """Two-tier relevance gate.
+
+    Chunks from the current directory pass the normal cutoff; chunks from
+    elsewhere must clear the tighter `cross` cutoff — so obviously-unrelated
+    other-project matches are dropped up front, while near-exact ones still
+    come through. Strict mode hard-scopes to the current directory. With no
+    scope known, fall back to the single cutoff (can't segment).
+    """
+    distance = row[7]
+    if not scope:
+        return distance <= cutoff
+    same = _same_scope(row[3], scope)
+    if strict:
+        return same and distance <= cutoff
+    return distance <= (cutoff if same else cross)
 
 
 def _worth_retrieving(prompt: str) -> bool:

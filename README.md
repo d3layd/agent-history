@@ -237,12 +237,16 @@ asked for, so this is precision-first:
   embedding model).
 - At most 3 chunks / ~2 KB per prompt; near-duplicates collapse.
 - Your current session's own chunks are excluded — the agent has that context.
-- **Project-aware.** Retrieval is similarity-only and spans every project, so
-  an unrelated project's excerpt can occasionally rank high. The injected
-  header names your current project and tells the agent to check each excerpt
-  against the task and disregard ones from elsewhere — the strong model does
-  the segmentation the embedder can't. (Deliberate `search` stays fully
-  cross-project; only automatic injection is filtered this way.)
+- **Directory-aware, two ways.** First, cheaply: retrieval prefers your
+  current directory — same-project chunks pass the normal cutoff, other-
+  project chunks must clear a tighter "near-exact" bar
+  (`AGENT_HISTORY_INJECT_CROSS_DIST`, default 14.0), so obviously-unrelated
+  matches are dropped before injection while genuinely strong cross-project
+  ones still come through. Second, as a backstop: the injected header names
+  your current project and tells the agent to disregard any excerpt from
+  elsewhere. The embedder can't know relevance, so this pairs a simple
+  distance heuristic with the model's judgement. (Deliberate `search` stays
+  fully cross-project; only automatic injection is scoped.)
 - Trivial prompts ("ok", "go ahead") and slash commands are skipped.
 - When Ollama is down, nothing is injected. Every failure path is a silent
   no-op — the hook can never break a prompt.
@@ -596,8 +600,9 @@ is no daemon, no server, and no separate process to keep alive.
 | `AGENT_HISTORY_EXTRA_DIRS` | – | Extra transcript roots, os.pathsep-separated |
 | `AGENT_HISTORY_NO_WSL` | – | Set to `1` to skip Windows-side transcripts |
 | `AGENT_HISTORY_INJECT` | – | `1`/`0` forces injection on/off (else on by default, off under strict) |
-| `AGENT_HISTORY_INJECT_MAX_DIST` | `17.0` | Injection relevance cutoff (L2 distance) |
-| `AGENT_HISTORY_STRICT` | – | `1` enables the compliance profile (injection off + project-scoped) |
+| `AGENT_HISTORY_INJECT_MAX_DIST` | `17.0` | Injection cutoff for same-directory chunks (L2 distance) |
+| `AGENT_HISTORY_INJECT_CROSS_DIST` | `14.0` | Tighter cutoff for other-directory chunks (near-exact only) |
+| `AGENT_HISTORY_STRICT` | – | `1` enables the compliance profile (injection off + hard project-scoped) |
 
 Switching `AGENT_HISTORY_MODEL` calls for **`agent-history reembed`** —
 vectors from different models are not comparable, and the tool detects the
