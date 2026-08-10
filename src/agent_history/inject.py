@@ -26,6 +26,7 @@ with no output.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from . import config, embed, store
@@ -34,6 +35,7 @@ MIN_PROMPT_CHARS = 12
 FETCH = 8
 MAX_CHUNKS = 3
 CHUNK_CHARS = 700
+SNIPPET_CHARS = 70  # per-memory preview length in the user-visible notice
 MAX_TOTAL_CHARS = 2200
 EMBED_TIMEOUT = 3
 
@@ -90,18 +92,30 @@ def _run(stream) -> int:
     if not picked:
         return 0
 
-    # systemMessage is shown to the user (not the model) — a passive notice
-    # that recall fired, so ambient injection isn't invisible.
-    noun = "memory" if len(picked) == 1 else "memories"
+    # systemMessage is shown to the user (not the model) — a passive notice,
+    # per prompt, of exactly which memories were pulled, so ambient injection
+    # is visible without the agent having to stop and narrate it.
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": _render(picked),
         },
-        "systemMessage": (f"\U0001f4da agent-history: {len(picked)} {noun} "
-                          "recalled  ·  /history:inject to toggle"),
+        "systemMessage": _system_message(picked),
     }))
     return 0
+
+
+def _system_message(rows: list[tuple]) -> str:
+    """A compact, per-memory list for the user — what was recalled, at a glance."""
+    noun = "memory" if len(rows) == 1 else "memories"
+    lines = [f"\U0001f4da agent-history recalled {len(rows)} {noun}"
+             "  ·  /history:inject to toggle"]
+    for agent, _origin, _session, cwd, timestamp, role, text, _dist in rows:
+        when = (timestamp or "")[:10]
+        where = os.path.basename((cwd or "").rstrip("/")) or (cwd or "?")
+        snippet = " ".join(text.split())[:SNIPPET_CHARS]
+        lines.append(f"  · {when} {agent}/{role} {where} — {snippet}")
+    return "\n".join(lines)
 
 
 def _worth_retrieving(prompt: str) -> bool:

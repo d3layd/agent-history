@@ -74,10 +74,13 @@ def test_enabled_injects_a_matching_chunk(indexed, capsys, monkeypatch):
     assert body["hookEventName"] == "UserPromptSubmit"
     assert "auth middleware" in body["additionalContext"]
     assert "session=old-session" in body["additionalContext"]
-    # user-visible count line, separate from the model-facing context
+    # user-visible notice lists which memory was pulled, with a snippet
     assert "systemMessage" in payload
-    assert "1 memory recalled" in payload["systemMessage"]
-    assert "auth middleware" not in payload["systemMessage"]
+    msg = payload["systemMessage"]
+    assert "recalled 1 memory" in msg
+    assert "auth middleware" in msg           # the snippet shows which memory
+    assert "old-session" not in msg           # it's a snippet, not the raw block
+    assert "/history:inject" in msg           # toggle stays discoverable
 
 
 def test_system_message_pluralizes(fake_embed, capsys, monkeypatch):
@@ -87,7 +90,9 @@ def test_system_message_pluralizes(fake_embed, capsys, monkeypatch):
         put(db, f"distinct indexed conversation number {i} about the auth project")
     _code, out = hook("tell me about the auth project conversations", capsys)
     msg = json.loads(out)["systemMessage"]
-    assert "memories recalled" in msg  # plural for >1
+    assert "recalled 3 memories" in msg  # plural for >1
+    # one list line per recalled memory (plus the header line)
+    assert len([ln for ln in msg.splitlines() if ln.strip().startswith("·")]) == 3
 
 
 def test_env_one_overrides_off_marker(indexed, capsys, monkeypatch):

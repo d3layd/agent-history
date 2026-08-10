@@ -9,6 +9,21 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.13.0] — 2026-08-10
+
+### Changed
+- **The injection notice now lists which memories were pulled**, not just a
+  count. Each recalled chunk gets a one-line entry — date, agent/role,
+  project, and a short snippet — so you can see what rode into a prompt at a
+  glance, passively, without the agent stopping to narrate it. Still a
+  user-only `systemMessage` (never added to the model's context), still ends
+  with the `/history:inject` toggle.
+
+### Fixed
+- A trigger test that compared a new file's mtime against the stamp could
+  flake on coarse-granularity filesystems; it now forces the mtime
+  deterministically.
+
 ## [0.12.0] — 2026-08-10
 
 ### Changed
