@@ -77,7 +77,7 @@ def test_run_exit_codes(conversation, capsys):
     assert show.run("no-such-session") == 1
 
 
-def test_viewer_binds_loopback_and_serves_the_api(conversation):
+def test_viewer_binds_loopback_and_serves_the_api(conversation, monkeypatch):
     import http.client
     import threading
 
@@ -93,9 +93,15 @@ def test_viewer_binds_loopback_and_serves_the_api(conversation):
     thread.start()
     try:
         conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+        # Stats never embed, so a configured-model mismatch must not 500 the
+        # page's initial load.
+        monkeypatch.setenv("AGENT_HISTORY_MODEL", "some-other-model")
         conn.request("GET", "/api/stats")
-        body = conn.getresponse().read().decode()
+        resp = conn.getresponse()
+        assert resp.status == 200
+        body = resp.read().decode()
         assert '"total"' in body
+        monkeypatch.delenv("AGENT_HISTORY_MODEL")
 
         conn.request("GET", "/api/session?session=s1&limit=2")
         resp = conn.getresponse()

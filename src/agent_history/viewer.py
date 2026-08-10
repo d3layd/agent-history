@@ -199,7 +199,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/":
                 self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
             elif parsed.path == "/api/stats":
-                self._json(store.stats(store.open_for_read()))
+                # Stats never embed, so a model mismatch must not break the
+                # page's initial load.
+                self._json(store.stats(store.open_for_read(check_model=False)))
             elif parsed.path == "/api/search":
                 self._json(search.search_rows(
                     params.get("q", ""),
