@@ -177,6 +177,15 @@ opt-in only — nothing is auto-detected. Markdown and `.txt` files are
 indexed recursively; vendored and hidden directories (`node_modules`,
 `.git`, …) are pruned, and files over 2MB are treated as logs and skipped.
 
+**Edited docs leave their old text behind.** The store is append-only by
+design — for transcripts that permanence is the whole point, because the
+source files get deleted. Docs are different: they are the one *mutable*
+source, so rewriting a document adds chunks for the new text while the old
+text's chunks remain and keep matching searches (check the timestamps when
+two versions of a runbook both surface). Append-mostly files, like daily
+logs, are unaffected. Refresh-on-change for docs is planned; until then,
+this fits stable reference material better than fast-churning drafts.
+
 Start with `doctor` if anything misbehaves — it reports whether Ollama is
 reachable, whether the model is pulled, what was detected, and how much is
 indexed.

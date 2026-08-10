@@ -122,6 +122,10 @@ def _anything_changed(stamp: Path) -> bool:
                     except OSError:
                         continue
                 continue
+            # NOTE: this rglob does not prune vendored dirs the way the docs
+            # adapter's walk does — a docs root containing node_modules pays a
+            # full traversal here each poll. Adapter-aware change detection is
+            # the eventual fix.
             for pattern in ("*.jsonl", "*.md", "*.txt"):
                 for path in root.rglob(pattern):
                     try:
