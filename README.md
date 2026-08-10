@@ -214,11 +214,20 @@ LLM compression passes; retrieval alone turns out to be enough, at zero token
 cost and with the original wording intact.
 
 Because it's local, free, and precision-gated, it's **on by default**. Each
-time it fires you see a one-line notice — `📚 agent-history: N memories
-recalled · /history:inject to toggle` — shown only to you, never added to the
-model's context. Toggle it with **`/history:inject`** in Claude Code, or
-`agent-history inject off` / `on` / `toggle` (and `AGENT_HISTORY_INJECT=0`
-force-disables).
+time it fires you see a notice listing exactly which memories were pulled —
+one line per chunk with its date, source, project, and a snippet:
+
+```text
+📚 agent-history recalled 3 memories  ·  /history:inject to toggle
+  · 2026-07-08 claude-code/assistant xiu — Fixed and deployed — restart the app…
+  · 2026-08-06 claude-code/assistant agent-history — README rewrite for the archive…
+  · 2026-02-25 codex/user openclaw — ssh into clamps, work on openclaw…
+```
+
+That's shown only to you, never added to the model's context, so you can
+watch recall happen while the agent works without it stopping to narrate.
+Toggle with **`/history:inject`** in Claude Code, or `agent-history inject
+off` / `on` / `toggle` (and `AGENT_HISTORY_INJECT=0` force-disables).
 
 Unsolicited context has to clear a much higher bar than search results you
 asked for, so this is precision-first:

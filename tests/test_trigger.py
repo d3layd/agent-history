@@ -52,8 +52,12 @@ def test_if_changed_runs_when_a_transcript_is_newer(transcripts, fake_embed):
     transcripts("proj", "s", [msg("user", "the original message in the file")])
     trigger.run("first", foreground=True)
 
-    # A new transcript is newer than the stamp written above.
-    transcripts("proj", "s2", [msg("user", "a brand new message appears now")])
+    # A new transcript, forced clearly newer than the stamp so the check is
+    # deterministic regardless of filesystem mtime granularity.
+    path = transcripts("proj", "s2", [msg("user", "a brand new message appears now")])
+    import os
+    since = config.stamp_path().stat().st_mtime
+    os.utime(path, (since + 5, since + 5))
     trigger.run("second", if_changed=True, foreground=True)
     assert "second trigger" in config.log_path().read_text(encoding="utf-8")
 
