@@ -237,6 +237,12 @@ asked for, so this is precision-first:
   embedding model).
 - At most 3 chunks / ~2 KB per prompt; near-duplicates collapse.
 - Your current session's own chunks are excluded — the agent has that context.
+- **Project-aware.** Retrieval is similarity-only and spans every project, so
+  an unrelated project's excerpt can occasionally rank high. The injected
+  header names your current project and tells the agent to check each excerpt
+  against the task and disregard ones from elsewhere — the strong model does
+  the segmentation the embedder can't. (Deliberate `search` stays fully
+  cross-project; only automatic injection is filtered this way.)
 - Trivial prompts ("ok", "go ahead") and slash commands are skipped.
 - When Ollama is down, nothing is injected. Every failure path is a silent
   no-op — the hook can never break a prompt.
