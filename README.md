@@ -374,6 +374,27 @@ would want a different store. For a personal transcript index the ceiling is
 remote, and in exchange there is no daemon, no server, and no separate process
 to keep alive.
 
+## Context injection (opt-in)
+
+```console
+$ agent-history inject on
+```
+
+With this enabled, a UserPromptSubmit hook embeds each prompt you type
+(locally, via Ollama), retrieves past-session chunks relevant to it, and
+injects them as context — so the agent already knows what you decided three
+weeks ago without being told. No LLM is involved anywhere: the prompt is the
+retrieval query, and the chunks arrive verbatim.
+
+Unsolicited context has to clear a much higher bar than search results you
+asked for, so this is precision-first: an absolute distance cutoff rejects
+weak matches (`AGENT_HISTORY_INJECT_MAX_DIST`, default 17.0 —
+recalibrate if you change embedding model), at most 3 chunks / ~2KB per
+prompt, your current session's own chunks are excluded, trivial prompts and
+slash commands are skipped, and when Ollama is down nothing is injected.
+Every failure path is a silent no-op — the hook can never break a prompt.
+`agent-history inject off` turns it back off.
+
 ## Automatic indexing
 
 The plugin installs two hooks:

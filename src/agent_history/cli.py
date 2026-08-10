@@ -5,11 +5,11 @@ import argparse
 import datetime
 import sys
 
-from . import (__version__, adapters, config, embed, index, search, show,
-               store, trigger, viewer)
+from . import (__version__, adapters, config, embed, index, inject, search,
+               show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "search", "sources", "doctor", "datadir",
-            "trigger", "show", "serve"}
+            "trigger", "show", "serve", "inject"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -61,6 +61,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "serve", help="local web viewer on 127.0.0.1 (loopback only)")
     serve.add_argument("--port", type=_port, default=viewer.DEFAULT_PORT,
                        help="1-65535, or 0 for an OS-assigned port")
+
+    inj = sub.add_parser(
+        "inject",
+        help="opt-in: auto-inject relevant past context into new prompts")
+    inj.add_argument("action", nargs="?", default="status",
+                     choices=["on", "off", "status", "run"],
+                     help="'run' is the hook entry point and reads stdin")
     return parser
 
 
@@ -179,6 +186,12 @@ def main(argv: list[str] | None = None) -> int:
                             limit=args.limit, as_json=args.as_json)
         if args.command == "serve":
             return viewer.run(port=args.port)
+        if args.command == "inject":
+            if args.action == "run":
+                return inject.run_hook()
+            if args.action in ("on", "off"):
+                return inject.set_enabled(args.action == "on")
+            return inject.status()
     except (store.StoreError, embed.EmbedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
