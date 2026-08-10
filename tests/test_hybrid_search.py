@@ -7,6 +7,13 @@ import pytest
 
 from agent_history import embed, search, store
 
+# These exercise the sqlite-vec virtual table, which some Python builds
+# cannot load at all (notably uv/Homebrew macOS builds on 3.11+).
+pytestmark = pytest.mark.skipif(
+    not store.extensions_supported(),
+    reason="this Python cannot load SQLite extensions",
+)
+
 
 def put(db, text, *, agent="claude-code", cwd="/w", session="s1",
         origin="/t/s1.jsonl", ts="2026-01-01T00:00:00Z"):
