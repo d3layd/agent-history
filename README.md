@@ -682,13 +682,23 @@ compose fine, and this one guarantees the source material survives.
 ## Roadmap
 
 The original roadmap — adapters for every agent found on this machine — is
-complete. What remains is driven by use:
+complete. What remains is driven by use, and tracked in the
+[issues](https://github.com/d3layd/agent-history/issues):
 
+- [ ] An optional **`history_recall` MCP tool** — recall as a tool the agent
+  invokes, so its call renders with Claude Code's native click-to-expand UI
+  (full query and results, inspectable). A complement to injection, not a
+  replacement: injection stays the ambient, zero-turn default; the tool is
+  the deliberate, inspectable path.
+- [ ] **Self-calibrating injection cutoff** so a model swap can't silently
+  mis-tune it (#13).
+- [ ] **CMMC/CUI hardening** — a strict-mode secret scrub and the rest of the
+  gap list toward a regulated deployment (#16).
+- [ ] **Multi-machine** merge / snapshot / restore over encrypted object
+  storage (#9).
 - [ ] An approximate vector index if a corpus outgrows exhaustive kNN
-  (hundreds of thousands of chunks — remote for a personal index)
-- [ ] Richer injection controls (result feedback; per-project scoping now
-  exists via [`strict` mode](#regulated-work-strict-mode))
-- [ ] Further agents as they appear — one adapter module each
+  (hundreds of thousands of chunks — remote for a personal index).
+- [ ] Further agents as they appear — one adapter module each.
 
 Adding an agent means writing a single module in
 `src/agent_history/adapters/` that yields `Record`s. The indexer and search
