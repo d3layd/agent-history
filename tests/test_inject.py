@@ -190,3 +190,29 @@ def test_toggle_flips_state(fake_embed, capsys):
     assert inject.toggle() == 0             # -> on
     assert config.inject_enabled()
     capsys.readouterr()
+
+
+def test_set_enabled_reports_env_override_on(fake_embed, capsys, monkeypatch):
+    monkeypatch.setenv("AGENT_HISTORY_INJECT", "1")   # forced on
+    inject.set_enabled(False)                          # ask for off
+    out = capsys.readouterr().out
+    assert "forcing it on" in out                      # honest, not "inject: off"
+    assert config.inject_enabled()                     # still on — env wins
+
+
+def test_set_enabled_reports_env_override_off(fake_embed, capsys, monkeypatch):
+    monkeypatch.setenv("AGENT_HISTORY_INJECT", "0")   # forced off
+    inject.set_enabled(True)                           # ask for on
+    out = capsys.readouterr().out
+    assert "forcing it off" in out
+    assert not config.inject_enabled()                 # still off — env wins
+
+
+def test_toggle_flips_marker_not_effective_under_override(fake_embed, capsys,
+                                                          monkeypatch):
+    monkeypatch.setenv("AGENT_HISTORY_INJECT", "1")
+    before = config.inject_marker_pref()
+    inject.toggle()
+    assert config.inject_marker_pref() is not before  # marker flipped
+    assert config.inject_enabled()                     # effective still forced on
+    capsys.readouterr()

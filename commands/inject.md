@@ -16,6 +16,6 @@ in one short line:
 - `toggle` → `agent-history inject toggle`
 
 `$ARGUMENTS` holds the requested action (empty means status). The change
-takes effect on the **next** session — Claude Code loads hooks at session
-start, so injection state for the current session is already fixed. Mention
-that when you report the new state.
+takes effect on the **next prompt** — the hook re-reads the on/off marker
+each time it runs, so no restart is needed. (If `AGENT_HISTORY_INJECT` is
+set in the environment, it overrides the marker; the CLI will say so.)

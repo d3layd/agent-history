@@ -157,6 +157,17 @@ def set_enabled(on: bool) -> int:
     else:
         marker.unlink(missing_ok=True)
 
+    override = config.inject_env_override()
+    if override is not None:
+        # The marker preference was saved, but the env var still decides the
+        # effective state — say so rather than print a state that isn't real.
+        actual = "on" if override else "off"
+        print(f"inject preference set to {'on' if on else 'off'} — but "
+              f"AGENT_HISTORY_INJECT is forcing it {actual}.")
+        print(f"  unset AGENT_HISTORY_INJECT for the '{'on' if on else 'off'}' "
+              "preference to take effect.")
+        return 0
+
     if on:
         print("inject: on" + ("  (strict: current project only)" if strict else ""))
         print(f"  cutoff:  distance <= {config.inject_max_distance()} "
@@ -170,8 +181,13 @@ def set_enabled(on: bool) -> int:
 
 
 def toggle() -> int:
-    """Flip the current state — the action behind the /history:inject command."""
-    return set_enabled(not config.inject_enabled())
+    """Flip the saved marker preference — the /history:inject action.
+
+    Flips the *marker*, not the effective state, so an active env override
+    can't make the flip a silent no-op; set_enabled reports if the override
+    is currently masking the change.
+    """
+    return set_enabled(not config.inject_marker_pref())
 
 
 def status() -> int:

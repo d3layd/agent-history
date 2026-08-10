@@ -155,22 +155,36 @@ def inject_off_path() -> Path:
     return data_home() / "inject.off"
 
 
-def inject_enabled() -> bool:
-    """Context injection default: ON normally, OFF under strict mode.
+def inject_env_override() -> bool | None:
+    """The `AGENT_HISTORY_INJECT` override, or None if unset.
 
-    `AGENT_HISTORY_INJECT=1` forces on and `=0` forces off, either way.
-    Otherwise: enabled unless the off-marker exists — and in strict mode the
-    default flips to off (injecting cross-context is exactly what strict
-    mode guards against), so it must be turned on deliberately.
+    When set it wins over the saved markers — so callers that change markers
+    can tell the user the change won't take effect until the env var is unset.
     """
     env = (_env("AGENT_HISTORY_INJECT", "") or "").strip().lower()
     if env in {"1", "true", "yes"}:
         return True
     if env in {"0", "false", "no"}:
         return False
+    return None
+
+
+def inject_marker_pref() -> bool:
+    """What the saved markers say, ignoring the env override.
+
+    Normal mode is default-on (off-marker disables); strict mode is
+    default-off (on-marker enables) — injecting cross-context is exactly what
+    strict guards against, so it must be turned on deliberately there.
+    """
     if strict_enabled():
         return inject_on_path().exists()
     return not inject_off_path().exists()
+
+
+def inject_enabled() -> bool:
+    """Effective injection state: env override if set, else the marker."""
+    override = inject_env_override()
+    return override if override is not None else inject_marker_pref()
 
 
 def inject_on_path() -> Path:
