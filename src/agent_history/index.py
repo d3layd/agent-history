@@ -7,12 +7,13 @@ mechanism works identically for file-backed and database-backed adapters.
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import sys
 import time
+from collections import Counter
 
-from . import adapters, config, embed, store, textproc
-from .textproc import chunk_text
+from . import adapters, config, embed, redact, store, textproc
 
 COMMIT_EVERY = 16
 
@@ -51,8 +52,23 @@ def _guard_reindex(force: bool) -> int | None:
     return 1
 
 
+def redacted_chunks(text: str) -> list[str]:
+    """Chunk ``text`` and redact secrets inside each chunk.
+
+    Secrets are located on the whole text and chunk boundaries are computed
+    on the original, so turning redaction on never moves a boundary: every
+    chunk without a secret keeps the exact text (and hash) it had before.
+    """
+    bounds = textproc.chunk_spans(text)
+    if not config.redact_enabled():
+        return [text[start:end] for start, end in bounds]
+    found = redact.spans(text)
+    return [redact.apply(text[start:end], found, start) for start, end in bounds]
+
+
 def _pending(
     seen: set[str],
+    counts: Counter[str] | None = None,
 ) -> tuple[list[tuple[adapters.Record, str, str]], set[str], list[tuple[str, str]]]:
     """Collect what needs indexing, and what mutable sources currently hold.
 
@@ -71,12 +87,14 @@ def _pending(
             # would compound into a memories-about-memories feedback loop.
             if textproc.is_injection(record.text):
                 continue
-            for piece in chunk_text(record.text):
+            for piece in redacted_chunks(record.text):
                 digest = hashlib.sha256(piece.encode("utf-8")).hexdigest()
                 produced.add(digest)
                 if digest in seen:
                     continue
                 seen.add(digest)
+                if counts is not None and "[REDACTED:" in piece:
+                    counts.update(redact.markers(piece))
                 out.append((record, piece, digest))
                 count += 1
         if getattr(adapter, "mutable", False):
@@ -113,7 +131,16 @@ def run(reindex: bool = False, force: bool = False) -> int:
     seen = store.existing_hashes(db)
     print(f"Already indexed: {len(seen)} chunk(s)")
 
-    pending, produced, mutable_targets = _pending(seen)
+    counts: Counter[str] = Counter()
+    pending, produced, mutable_targets = _pending(seen, counts)
+    if counts:
+        print("redacted in new chunks: " + ", ".join(f"{n} {cls}" for cls, n in counts.most_common()))
+    store.set_meta(db, "redact_last", json.dumps({
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "enabled": config.redact_enabled(),
+        "counts": dict(counts),
+    }))
+    db.commit()
 
     # Mutable sources (docs) are refreshed before the early return: an edit
     # that only removes text produces no new chunks but still leaves stale

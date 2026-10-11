@@ -150,6 +150,12 @@ def strict_enabled() -> bool:
     return strict_path().exists()
 
 
+def redact_enabled() -> bool:
+    """Secret redaction at ingest: on unless `AGENT_HISTORY_REDACT=off`."""
+    env = (_env("AGENT_HISTORY_REDACT", "") or "").strip().lower()
+    return env not in {"0", "off", "false", "no"}
+
+
 def inject_off_path() -> Path:
     """Presence disables injection. Absence = on (the default)."""
     return data_home() / "inject.off"

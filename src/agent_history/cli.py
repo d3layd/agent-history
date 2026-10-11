@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import sys
 
-from . import (__version__, adapters, config, embed, index, inject, search,
-               show, store, trigger, viewer)
+from . import (__version__, adapters, config, embed, index, inject, scrub,
+               search, show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict"}
+            "purge", "strict", "scrub"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,6 +42,11 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="delete the entire index (total destruction)")
     pur.add_argument("--yes", action="store_true",
                      help="actually delete; without it, only previews the count")
+
+    scr = sub.add_parser(
+        "scrub", help="redact secrets already stored in the index")
+    scr.add_argument("--yes", action="store_true",
+                     help="rewrite the affected chunks; without it, only previews")
 
     strict = sub.add_parser(
         "strict", help="compliance profile: injection off + scoped to project")
@@ -250,6 +256,8 @@ def _cmd_doctor() -> int:
     inj = "on" if config.inject_enabled() else "off"
     print(f"inject:     {inj}"
           + ("  (strict: project-scoped)" if config.strict_enabled() else ""))
+    print("redact:     " + ("on" if config.redact_enabled()
+                             else "OFF ($AGENT_HISTORY_REDACT) — secrets are indexed verbatim"))
 
     ok, detail = embed.reachable()
     print(f"ollama up:  {'yes' if ok else 'NO'} ({detail})")
@@ -290,6 +298,18 @@ def _cmd_doctor() -> int:
     for agent, count in info["per_agent"].items():
         print(f"              {agent}: {count}")
     print(f"built with: {info['model']} ({info['dimension']}-dim)")
+    last = store.get_meta(db, "redact_last")
+    if last:
+        try:
+            data = json.loads(last)
+            counts = data.get("counts") or {}
+            summary = (", ".join(f"{n} {cls}" for cls, n in
+                                 sorted(counts.items(), key=lambda kv: -kv[1]))
+                       or "none")
+            print(f"redacted:   last index run ({data.get('at', '?')}): {summary}")
+        except (ValueError, AttributeError):
+            pass
+    print("            stored chunks are not rechecked here — run: agent-history scrub")
 
     stamp = config.stamp_path()
     if stamp.exists():
@@ -361,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_purge(args)
         if args.command == "strict":
             return _cmd_strict(args.action)
+        if args.command == "scrub":
+            return scrub.run(yes=args.yes)
     except (store.StoreError, embed.EmbedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

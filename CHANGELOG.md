@@ -9,6 +9,24 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [0.16.0] — 2026-10-11
+
+### Added
+- **Secret redaction at ingest, on by default** (#23). Before anything is
+  chunked, hashed or embedded, recognised secrets are replaced with typed
+  markers like `[REDACTED:aws_access_key]`: private-key blocks, Anthropic,
+  OpenAI, GitHub, AWS, Slack, Stripe and Google keys, JWTs, `Bearer` tokens,
+  URL passwords, and `password=`/`token:`-style assignments. Matches are found
+  on the whole record but applied inside the original chunk boundaries, so
+  chunks without a secret keep their exact text and hash. Opt out with
+  `AGENT_HISTORY_REDACT=off`. `doctor` reports the setting and the last
+  index run's per-class counts.
+- **`agent-history scrub [--yes]`** redacts secrets already in an index:
+  preview by default, then rewrites affected chunks in place (text, content
+  hash, full-text row, re-embedded vector), including orphaned chunks, and
+  deletes any that become duplicates. Idempotent; refuses while a `reembed`
+  is staged.
+
 ## [0.15.0] — 2026-08-10
 
 ### Changed

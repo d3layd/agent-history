@@ -31,16 +31,21 @@ def scrub(text: str) -> str:
     return _BASE64_RUN.sub("[blob]", text)
 
 
-def chunk_text(text: str) -> list[str]:
-    """Split into overlapping chunks small enough to embed."""
+def chunk_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) offsets of overlapping chunks small enough to embed."""
     if len(text) <= MAX_CHUNK_CHARS:
-        return [text]
-    chunks: list[str] = []
+        return [(0, len(text))]
+    out: list[tuple[int, int]] = []
     start = 0
     while start < len(text):
         end = min(start + MAX_CHUNK_CHARS, len(text))
-        chunks.append(text[start:end])
+        out.append((start, end))
         if end == len(text):
             break
         start = end - CHUNK_OVERLAP
-    return chunks
+    return out
+
+
+def chunk_text(text: str) -> list[str]:
+    """Split into overlapping chunks small enough to embed."""
+    return [text[start:end] for start, end in chunk_spans(text)]
