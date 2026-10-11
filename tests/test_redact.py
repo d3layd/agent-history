@@ -93,6 +93,7 @@ def test_redaction_is_idempotent():
 
 
 def test_a_secret_cut_by_a_chunk_boundary_is_redacted_in_both_chunks(monkeypatch):
+    monkeypatch.setenv("AGENT_HISTORY_REDACT", "on")
     monkeypatch.setattr(textproc, "MAX_CHUNK_CHARS", 60)
     monkeypatch.setattr(textproc, "CHUNK_OVERLAP", 10)
     text = "x" * 40 + " " + GH + " " + "y" * 40
@@ -108,7 +109,7 @@ def test_boundaries_do_not_move_when_redaction_turns_on(monkeypatch):
     text = "a" * 20 + " " + GH + " " + "b" * 150
     monkeypatch.setenv("AGENT_HISTORY_REDACT", "off")
     plain = index.redacted_chunks(text)
-    monkeypatch.delenv("AGENT_HISTORY_REDACT")
+    monkeypatch.setenv("AGENT_HISTORY_REDACT", "on")
     red = index.redacted_chunks(text)
     assert len(plain) == len(red)
     # Chunks that never held the secret are byte-identical, so their hashes
@@ -137,7 +138,8 @@ def _fts_hits(term):
 
 
 @needs_vec
-def test_secrets_never_reach_the_index_or_the_embedder(transcripts, fake_embed):
+def test_secrets_never_reach_the_index_or_the_embedder(transcripts, fake_embed, monkeypatch):
+    monkeypatch.setenv("AGENT_HISTORY_REDACT", "on")
     transcripts("proj", "s", [msg("user", f"push failed, my token is {GH} please fix")])
     assert index.run() == 0
     assert all(GH not in t for t in _texts())
@@ -146,16 +148,27 @@ def test_secrets_never_reach_the_index_or_the_embedder(transcripts, fake_embed):
 
 
 @needs_vec
-def test_redaction_can_be_turned_off(transcripts, fake_embed, monkeypatch):
-    monkeypatch.setenv("AGENT_HISTORY_REDACT", "off")
+def test_local_index_keeps_secrets_by_default(transcripts, fake_embed):
+    # On one machine the index is often the only place a credential can still
+    # be found; recalling it must keep working unless redaction is asked for.
     transcripts("proj", "s", [msg("user", f"push failed, my token is {GH} please fix")])
     index.run()
     assert any(GH in t for t in _texts())
 
 
+def test_strict_mode_implies_redaction(monkeypatch):
+    from agent_history import config
+    assert config.redact_enabled() is False
+    monkeypatch.setenv("AGENT_HISTORY_STRICT", "1")
+    assert config.redact_enabled() is True
+    monkeypatch.setenv("AGENT_HISTORY_REDACT", "off")
+    assert config.redact_enabled() is False, "an explicit setting wins"
+
+
 @needs_vec
-def test_last_run_counts_are_recorded(transcripts, fake_embed):
+def test_last_run_counts_are_recorded(transcripts, fake_embed, monkeypatch):
     import json
+    monkeypatch.setenv("AGENT_HISTORY_REDACT", "on")
     transcripts("proj", "s", [msg("user", f"key {AWS} and url postgres://u:pa55wordZ@h/d")])
     index.run()
     db = store.open_for_read()
@@ -168,7 +181,7 @@ def _index_unredacted(transcripts, monkeypatch, text, name="s"):
     monkeypatch.setenv("AGENT_HISTORY_REDACT", "off")
     transcripts("proj", name, [msg("user", text)])
     index.run()
-    monkeypatch.delenv("AGENT_HISTORY_REDACT")
+    monkeypatch.setenv("AGENT_HISTORY_REDACT", "on")
 
 
 @needs_vec
@@ -203,7 +216,6 @@ def test_scrub_covers_orphaned_chunks(transcripts, fake_embed, monkeypatch):
     monkeypatch.setenv("AGENT_HISTORY_REDACT", "off")
     path = transcripts("proj", "gone", [msg("user", f"deleted later {GH} text")])
     index.run()
-    monkeypatch.delenv("AGENT_HISTORY_REDACT")
     path.unlink()
     assert scrub.run(yes=True) == 0
     assert all(GH not in t for t in _texts())
@@ -221,7 +233,7 @@ def test_reindex_after_scrub_converges_without_duplicates(transcripts, fake_embe
 @needs_vec
 def test_scrub_dedups_when_the_redacted_copy_already_exists(transcripts, fake_embed, monkeypatch):
     _index_unredacted(transcripts, monkeypatch, f"old session leaked {GH} here")
-    index.run()  # redaction on: the redacted copy is indexed alongside
+    index.run()  # redaction now on: the redacted copy is indexed alongside
     db = store.open_for_read()
     assert store.stats(db)["total"] == 2
     assert scrub.run(yes=True) == 0

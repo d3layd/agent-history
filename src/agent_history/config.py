@@ -151,9 +151,19 @@ def strict_enabled() -> bool:
 
 
 def redact_enabled() -> bool:
-    """Secret redaction at ingest: on unless `AGENT_HISTORY_REDACT=off`."""
+    """Secret redaction for the local index.
+
+    Off by default: on a single machine the index is often the only place a
+    credential can still be found, and recalling it is a feature. On with
+    `AGENT_HISTORY_REDACT=on`, or implied by strict mode. Anything that leaves
+    the machine (bundles, a hub) is redacted regardless of this setting.
+    """
     env = (_env("AGENT_HISTORY_REDACT", "") or "").strip().lower()
-    return env not in {"0", "off", "false", "no"}
+    if env in {"1", "on", "true", "yes"}:
+        return True
+    if env in {"0", "off", "false", "no"}:
+        return False
+    return strict_enabled()
 
 
 def inject_off_path() -> Path:

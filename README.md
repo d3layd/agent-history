@@ -603,7 +603,7 @@ is no daemon, no server, and no separate process to keep alive.
 | `AGENT_HISTORY_INJECT_MAX_DIST` | `17.0` | Injection cutoff for same-directory chunks (L2 distance) |
 | `AGENT_HISTORY_INJECT_CROSS_DIST` | `14.0` | Tighter cutoff for other-directory chunks (near-exact only) |
 | `AGENT_HISTORY_STRICT` | – | `1` enables the compliance profile (injection off + hard project-scoped) |
-| `AGENT_HISTORY_REDACT` | on | `off` stores secrets verbatim instead of redacting them at ingest |
+| `AGENT_HISTORY_REDACT` | off (on under strict) | `on` replaces secrets with typed markers at ingest; `off` forces verbatim even under strict |
 
 Switching `AGENT_HISTORY_MODEL` calls for **`agent-history reembed`** —
 vectors from different models are not comparable, and the tool detects the
@@ -658,17 +658,21 @@ ordinary daily use turned up live database URIs with passwords, API keys, and
 
 The posture that follows:
 
-- **Secrets are redacted before they are stored.** At ingest, before
-  chunking, hashing or embedding, recognised secrets are replaced with a typed
-  marker such as `[REDACTED:github_token]`, so a search hit still shows *that*
-  something was there. Covered: private-key blocks, Anthropic / OpenAI /
-  GitHub / AWS / Slack / Stripe / Google keys, JWTs, `Bearer` tokens, the
-  password in `scheme://user:password@host` URLs, and `password=` / `token:` /
-  `api_key=`-style assignments. Matching is deliberately conservative (git
-  SHAs, UUIDs, hashes, env-var references and prose about passwords are
-  kept), so treat it as a strong reduction, not a guarantee. On by default;
-  `AGENT_HISTORY_REDACT=off` opts out, and `doctor` shows the setting and the
-  last run's per-class counts.
+- **Secret redaction is available, and off by default locally.** On one
+  machine the index is often the only place a credential can still be found,
+  and recalling it is a feature, so secrets are indexed verbatim unless you
+  ask otherwise. With `AGENT_HISTORY_REDACT=on` (implied by `strict` mode),
+  recognised secrets are replaced at ingest, before chunking, hashing or
+  embedding, with a typed marker such as `[REDACTED:github_token]`, so a hit
+  still shows *that* something was there. Covered: private-key blocks,
+  Anthropic / OpenAI / GitHub / AWS / Slack / Stripe / Google keys, JWTs,
+  `Bearer` tokens, the password in `scheme://user:password@host` URLs, and
+  `password=` / `token:` / `api_key=`-style assignments. Matching is
+  deliberately conservative (git SHAs, UUIDs, hashes, env-var references and
+  prose about passwords are kept), so treat it as a strong reduction, not a
+  guarantee. Anything that leaves the machine (#9 bundles, a #25 hub) is
+  meant to be redacted regardless of this setting. `doctor` shows the setting
+  and the last run's per-class counts.
 - `index.db` deserves the same handling as `~/.ssh`. It is created `0600`
   inside a `0700` directory — deliberately, since the default umask would
   otherwise make it world-readable on a shared machine. Never commit it;
@@ -690,8 +694,9 @@ The posture that follows:
 
 ### Cleaning an existing index: `scrub`
 
-Redaction only protects chunks written after it shipped. `scrub` finds
-secrets already stored and rewrites those chunks in place — new text, new
+Turning redaction on only protects chunks written from then on. When you are
+ready to drop stored credentials (move them into a password manager first),
+`scrub` finds secrets already stored and rewrites those chunks in place — new text, new
 content hash, full-text row swapped, vector re-embedded — keeping ids and
 provenance. It reaches orphaned chunks too, whose transcripts are gone and
 which could never be re-derived:

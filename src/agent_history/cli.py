@@ -256,8 +256,9 @@ def _cmd_doctor() -> int:
     inj = "on" if config.inject_enabled() else "off"
     print(f"inject:     {inj}"
           + ("  (strict: project-scoped)" if config.strict_enabled() else ""))
-    print("redact:     " + ("on" if config.redact_enabled()
-                             else "OFF ($AGENT_HISTORY_REDACT) — secrets are indexed verbatim"))
+    print("redact:     " + ("on — secrets are replaced at ingest" if config.redact_enabled()
+                             else "off — secrets are indexed verbatim "
+                                  "(AGENT_HISTORY_REDACT=on or strict to enable)"))
 
     ok, detail = embed.reachable()
     print(f"ollama up:  {'yes' if ok else 'NO'} ({detail})")
