@@ -69,6 +69,7 @@ def redacted_chunks(text: str) -> list[str]:
 def _pending(
     seen: set[str],
     counts: Counter[str] | None = None,
+    active: list | None = None,
 ) -> tuple[list[tuple[adapters.Record, str, str]], set[str], list[tuple[str, str]]]:
     """Collect what needs indexing, and what mutable sources currently hold.
 
@@ -80,7 +81,7 @@ def _pending(
     out: list[tuple[adapters.Record, str, str]] = []
     produced: set[str] = set()
     mutable_targets: set[tuple[str, str]] = set()
-    for adapter in adapters.available_adapters():
+    for adapter in (adapters.available_adapters() if active is None else active):
         count = 0
         for record in adapter.records():
             # Never index this tool's own injected recall — re-indexing it
@@ -109,6 +110,19 @@ def _pending(
     return out, produced, sorted(mutable_targets)
 
 
+def _release_consumed(active: list) -> None:
+    """Let queue-like adapters (the hub inbox) retire what this run read.
+
+    Called only once everything read has been committed and nothing was
+    skipped, so a crash or an embed failure just means the same batches are
+    read again — content-hash dedup makes that free.
+    """
+    for adapter in active:
+        release = getattr(adapter, "release", None)
+        if callable(release):
+            release()
+
+
 def run(reindex: bool = False, force: bool = False) -> int:
     if reindex:
         code = _guard_reindex(force)
@@ -119,6 +133,10 @@ def run(reindex: bool = False, force: bool = False) -> int:
 
     active = adapters.available_adapters()
     if not active:
+        if config.hub_mode():
+            print("hub mode: no inbox to index. Set AGENT_HISTORY_INBOX to an "
+                  "existing directory.", file=sys.stderr)
+            return 1
         print("No agent transcripts found on this machine.", file=sys.stderr)
         print("Checked: ~/.claude/projects, ~/.codex/sessions, "
               "~/.local/share/opencode, ~/.hermes*/state.db "
@@ -132,7 +150,7 @@ def run(reindex: bool = False, force: bool = False) -> int:
     print(f"Already indexed: {len(seen)} chunk(s)")
 
     counts: Counter[str] = Counter()
-    pending, produced, mutable_targets = _pending(seen, counts)
+    pending, produced, mutable_targets = _pending(seen, counts, active)
     if counts:
         print("redacted in new chunks: " + ", ".join(f"{n} {cls}" for cls, n in counts.most_common()))
     store.set_meta(db, "redact_last", json.dumps({
@@ -151,6 +169,7 @@ def run(reindex: bool = False, force: bool = False) -> int:
 
     if not pending:
         print("Up to date.")
+        _release_consumed(active)
         return 0
 
     print(f"Embedding {len(pending)} new chunk(s)...")
@@ -181,6 +200,7 @@ def run(reindex: bool = False, force: bool = False) -> int:
             text=text,
             content_hash=digest,
             vector=vector,
+            machine=record.machine,
         )
 
         if position % COMMIT_EVERY == 0:
@@ -194,6 +214,8 @@ def run(reindex: bool = False, force: bool = False) -> int:
     print(f"Done in {time.time() - started:.1f}s.")
     if failures:
         print(f"({failures} chunk(s) skipped due to embed errors)", file=sys.stderr)
+    else:
+        _release_consumed(active)
     return 0
 
 

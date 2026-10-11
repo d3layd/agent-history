@@ -111,6 +111,13 @@ def _anything_changed(stamp: Path) -> bool:
     from . import adapters
 
     for adapter in adapters.available_adapters():
+        # A queue (the hub inbox) has no "newer than the stamp": unread
+        # batches are the change, and stay one until they are retired.
+        pending = getattr(adapter, "has_pending", None)
+        if callable(pending):
+            if pending():
+                return True
+            continue
         # An adapter that knows its own eligible file set (pruned vendored
         # dirs, size caps) names it via watch_files(), so an ineligible file
         # changing can never wake the indexer.

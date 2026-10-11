@@ -11,8 +11,9 @@ db:... reference) or a session id.
 from __future__ import annotations
 
 import json
+import sys
 
-from . import store
+from . import config, remote, store
 
 PER_CHUNK_CHARS = 2000
 
@@ -46,14 +47,29 @@ def rows_for(target: str, *, around: str | None = None,
             "timestamp": timestamp,
             "role": role,
             "text": text,
+            "machine": machine or config.machine_id(),
         }
-        for agent, origin, session_id, cwd, timestamp, role, text in rows
+        for (agent, origin, session_id, cwd, timestamp, role, text,
+             machine) in rows
     ]
 
 
 def run(target: str, *, around: str | None = None, limit: int = 40,
-        as_json: bool = False) -> int:
-    rows = rows_for(target, around=around, limit=limit)
+        as_json: bool = False, where: str | None = None) -> int:
+    """``where`` is None (local first, then the hub), "local", or "hub"."""
+    configured = config.remote_url()
+    if where == "hub" and not configured:
+        print("error: --hub needs AGENT_HISTORY_REMOTE=ssh://user@host",
+              file=sys.stderr)
+        return 1
+    rows: list[dict] = []
+    if where == "local" or not configured or (
+            where is None and config.db_path().exists()):
+        rows = rows_for(target, around=around, limit=limit)
+    if not rows and configured and where != "local":
+        # A hit from another machine is not in the local index; the hub has it.
+        return remote.passthrough(remote.show_args(
+            target, around=around, limit=limit, as_json=as_json))
     if not rows:
         print(f"(nothing indexed for {target!r} — pass an origin path or "
               "session id exactly as search printed it)")
@@ -64,8 +80,10 @@ def run(target: str, *, around: str | None = None, limit: int = 40,
         return 0
 
     first = rows[0]
+    elsewhere = (f"  machine={first['machine']}"
+                 if first["machine"] != config.machine_id() else "")
     print(f"{first['agent']}  session={first['session_id']}  "
-          f"cwd={first['cwd'] or '?'}")
+          f"cwd={first['cwd'] or '?'}{elsewhere}")
     print(f"origin: {first['file']}")
     print()
     for row in rows:

@@ -15,7 +15,7 @@ from agent_history import embed, inject, store
 
 def row(cwd, distance):
     # (agent, origin, session_id, cwd, timestamp, role, text, distance)
-    return ("claude-code", "/o", "s", cwd, "t", "assistant", "x", distance)
+    return ("claude-code", "/o", "s", cwd, "t", "assistant", "x", None, distance)
 
 
 def test_same_scope_matches_dir_and_subdirs():
