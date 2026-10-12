@@ -9,7 +9,48 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
-## [Unreleased]
+## [0.17.0] — 2026-10-15
+
+### Added
+- **Hub: one central index that every machine feeds and every session can
+  search** (#25). See the README's "Hub (central history)" section and the
+  examples in `deploy/`.
+- **`agent-history ship`** sends redacted Records to a hub
+  (`AGENT_HISTORY_HUB_INGEST`, optional `AGENT_HISTORY_HUB_KEY`). Every record
+  is redacted unconditionally, ignoring the local `AGENT_HISTORY_REDACT`.
+  New records go into immutable JSONL batches in an outbox and are uploaded
+  with `rsync --remove-source-files`; a record is marked shipped only after
+  its batch has been delivered, so a failed upload loses and duplicates
+  nothing. `--dry-run` reports counts only; `--backfill-from-index` also
+  exports chunks already in the local index (watermarked). Overlapping runs
+  no-op under a lock, and the SessionEnd/PreCompact `trigger` ships after
+  indexing when the destination is set.
+- **Machine provenance**: a `machine` column on chunks (added in place, no
+  re-embed; old rows count as this machine), `config.machine_id()`
+  (`AGENT_HISTORY_MACHINE` or the short hostname), `Record.machine`, a
+  `search --machine` filter and `--exclude-machine`, and `@machine` on results
+  and in `show` when it is not the local one. `doctor` lists per-machine counts.
+- **Hub mode**: `AGENT_HISTORY_INBOX` enables an inbox adapter reading
+  `<inbox>/<machine>/*.jsonl` (the machine is the directory name, never a
+  field in the file); consumed batches move to `.processed/` only after the
+  index run commits. `AGENT_HISTORY_HUB=1` indexes only the inbox and forces
+  redaction on.
+- **Remote search**: `AGENT_HISTORY_REMOTE=ssh://user@host[:port]` (and
+  `AGENT_HISTORY_REMOTE_KEY`). `search` merges local and hub results by
+  reciprocal-rank fusion (hub only when there is no local index) and fails
+  open with a one-line warning if the hub is unreachable; `show` falls back to
+  the hub. `--local` / `--hub` force one side.
+- **`agent-history serve-ssh`** for `command="...",restrict` in the hub's
+  authorized_keys: only `search` and `show`, validated by the normal parser,
+  run in-process, never through a shell.
+- **Tenancy**: one index file per tenant (`inbox/<tenant>/<machine>/`,
+  `tenants/<tenant>/`), `serve-ssh --tenants a,b` fixes which tenants a read
+  key can open (from the forced command, never from the client), `--tenant`
+  narrows within that list, multi-tenant searches merge and label results.
+
+### Changed
+- Store rows carry the machine as their eighth column, so the distance now
+  follows at index 8 (internal; the JSON output only gains `machine`).
 
 ### Fixed
 - **Hybrid search's full-text half works on natural-language queries.** Terms

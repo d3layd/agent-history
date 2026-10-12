@@ -257,6 +257,7 @@ def run(dry_run: bool = False, backfill: bool = False) -> int:
         if not acquired:
             print("ship: another run is in progress; skipping")
             return 0
+        config.secure_file(config.ship_lock_path())
         return _run_locked(dest, False, backfill)
 
 

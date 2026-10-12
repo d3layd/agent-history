@@ -174,11 +174,15 @@ $ agent-history search "query" --mode text  # exact match, no Ollama needed
 $ agent-history search "query" --mode vector   # embeddings only
 $ agent-history search "query" --sort newest   # chronological, not relevance
 $ agent-history search "query" --json       # machine-readable
+$ agent-history search "query" --machine laptop   # one machine's history
 $ agent-history "query"                     # `search` is the default
 
 $ agent-history show <session-or-origin>    # the conversation around a hit
 $ agent-history show s1 --around 2026-06-14T22:03  # centred on a timestamp
 $ agent-history serve                       # web viewer at http://127.0.0.1:8127
+
+$ agent-history ship                        # send redacted records to the hub
+$ agent-history search "query" --hub        # hub only (see "Hub" below)
 
 $ agent-history docs add ~/ops-library      # index a documentation tree
 $ agent-history inject off                  # injection is on by default
@@ -409,6 +413,111 @@ waking Ollama when there is nothing to do, so idle hours cost nothing. For
 docs trees it consults the adapter's own pruned file set, so a touched
 `node_modules` readme or an oversized log can never wake the indexer.
 
+## Hub (central history)
+
+One index on a server that every machine feeds and every session can search —
+for agents that live on servers, for a workstation that is asleep, or for a
+box that should hold the index so laptops need no Ollama. Design and
+rationale: [#25](https://github.com/d3layd/agent-history/issues/25).
+
+```
+ pc        ─┐                                       ┌─▶ agent-history search (merged with local)
+ laptop    ─┼─ ship: redacted Records, rsync/ssh ─▶ HUB ─┼─▶ agent-history show
+ server    ─┘    (upload-only key)        inbox → index  └─ read-only key, serve-ssh
+```
+
+**Machines ship Records, not transcripts.** `agent-history ship` runs the
+normal adapters, redacts every record, and uploads JSONL batches (about 4% of
+the raw transcript bytes). The hub embeds with its own Ollama, so `meta.model`
+stays consistent and shippers need no embedder.
+
+```console
+$ export AGENT_HISTORY_HUB_INGEST=ahub@hub.example.invalid:   # rsync destination
+$ export AGENT_HISTORY_HUB_KEY=~/.ssh/agent-history-ingest    # optional identity
+$ agent-history ship --dry-run              # counts only, writes and sends nothing
+$ agent-history ship                        # new records since last time
+$ agent-history ship --backfill-from-index  # also chunks already in your index,
+                                            # incl. transcripts that no longer exist
+```
+
+Run it from a timer (`deploy/machine/`: a systemd user unit every 2
+minutes). With `AGENT_HISTORY_HUB_INGEST` set, the SessionEnd/PreCompact
+hooks ship too, right after indexing. Shipping is idempotent and crash-safe:
+new records are written to `outbox/` as immutable batches (at most 2000 lines),
+uploaded with `rsync --remove-source-files`, and a record counts as shipped
+only once its batch has left the outbox. A failed upload leaves the batches in
+place for the next run; overlapping runs no-op under a lock.
+
+**The hub** sets `AGENT_HISTORY_HUB=1` and `AGENT_HISTORY_INBOX=<dir>`. In hub
+mode only the inbox is indexed (never the hub's own transcripts) and
+redaction is forced on, whatever else is configured, as a second line of
+defence in case a shipper misbehaves. The inbox holds
+`<machine>/*.jsonl`; the machine name is the *directory*, never a field inside
+a file. Once a run has committed, consumed batches move to
+`.processed/<machine>/`, so a crash just re-reads them (content-hash dedup
+makes that free); prune `.processed` on your own schedule. Chunks gain a
+`machine` column (migrated in place, no re-embed); old rows count as the local
+machine. Identical text is stored once, attributed to whichever machine's copy
+was indexed first (the existing dedup rule), so `--machine` can miss a chunk
+another machine said word for word.
+
+**Searching the hub.** Set `AGENT_HISTORY_REMOTE=ssh://reader@hub.example.invalid[:port]`
+(and optionally `AGENT_HISTORY_REMOTE_KEY`):
+
+- With a local index, `search` queries both and merges them by reciprocal-rank
+  fusion; the hub is asked to leave out this machine's own chunks, so nothing
+  repeats. Results from other machines show `@machine`.
+- Without a local index, `search` runs on the hub and prints its answer.
+- `--local` / `--hub` force one side. If the hub is unreachable, `search`
+  prints one warning line to stderr and still returns the local results.
+- `show` looks locally first, then asks the hub, so any hit can be opened.
+
+**Tenancy.** A hub can hold several people's or clients' history, and one
+tenant must never be able to read another's. Separation is structural: **one
+index file per tenant**, not a tenant column. The layout is
+`inbox/<tenant>/<machine>/` for uploads and `tenants/<tenant>/` (a data home)
+for each index, with one templated indexer per tenant. Ingest keys are pinned
+to a single `<tenant>/<machine>` directory, so shippers know nothing of
+tenants, and a machine name only has to be unique within its tenant. A search
+key's `serve-ssh --tenants a,b` decides which index files it may open: a
+request for any other tenant is refused (it is not filtered, the file is never
+opened), `show` resolves a session only inside the allowed list, and a key
+with several tenants gets their results merged and labelled. Tenant names are
+`[a-z0-9][a-z0-9-]{0,40}`; anything else, or a directory that resolves
+outside the tenants root, is rejected. The list comes only from the forced
+command in `authorized_keys`, never from the client's request.
+
+**Security model**
+
+- **Redacted before it leaves.** `ship` ignores the local `AGENT_HISTORY_REDACT`
+  setting: your local index may keep credentials on purpose, but nothing
+  shipped does. The hub redacts again regardless. (Redaction is conservative
+  pattern matching, a strong reduction and not a guarantee; for `--backfill-from-index`
+  it works per stored chunk, so a secret cut by a chunk boundary can leave a
+  fragment, the same limit `scrub` has.)
+- **Two kinds of key, both pinned.** Ingest keys are `command="rrsync -wo
+  <dir>",restrict`: they can only write into one directory and cannot read
+  anything back. Search keys are `command="agent-history serve-ssh
+  --tenants ...",restrict`: `serve-ssh` splits `$SSH_ORIGINAL_COMMAND` with
+  `shlex`, accepts only `search` and `show` (validated by the normal argument
+  parser), runs them in-process and never starts a shell. `index`, `purge`,
+  `scrub`, anything else, or an empty request exits non-zero. Shell
+  metacharacters in a query are just query text.
+- **Nothing listens on the network** beyond sshd. Ollama stays on loopback,
+  and the usual rules still apply: `AGENT_HISTORY_HOME` is `0700`/`0600`, the
+  hub's disk should be encrypted (the index has no encryption of its own),
+  and `.processed/` holds the redacted batches as received.
+- **Tenant isolation is a software boundary.** All tenants in the examples run
+  as one unix user (`ahub`), so a bug in sshd restrictions or in `serve-ssh`
+  would be the only thing between a client key and another tenant's files.
+  For a client you do not fully trust, give each tenant its own unix user and
+  directory modes (`0700`), which makes the boundary the operating system's.
+
+Examples, with no secrets and no real hosts, are in [`deploy/`](deploy/):
+templated systemd units for the hub's indexer (`agent-history-hub-index@<tenant>`
+`.service` / `.path` / `.timer`), a user unit and timer for shipping, and
+`authorized_keys.example`.
+
 ## How indexing works
 
 ```
@@ -603,7 +712,15 @@ is no daemon, no server, and no separate process to keep alive.
 | `AGENT_HISTORY_INJECT_MAX_DIST` | `17.0` | Injection cutoff for same-directory chunks (L2 distance) |
 | `AGENT_HISTORY_INJECT_CROSS_DIST` | `14.0` | Tighter cutoff for other-directory chunks (near-exact only) |
 | `AGENT_HISTORY_STRICT` | – | `1` enables the compliance profile (injection off + hard project-scoped) |
-| `AGENT_HISTORY_REDACT` | off (on under strict) | `on` replaces secrets with typed markers at ingest; `off` forces verbatim even under strict |
+| `AGENT_HISTORY_REDACT` | off (on under strict) | `on` replaces secrets with typed markers at ingest; `off` forces verbatim even under strict. Never applies to `ship` (always redacts) or a hub (always on) |
+| `AGENT_HISTORY_MACHINE` | short hostname | This machine's name in a shared index |
+| `AGENT_HISTORY_HUB_INGEST` | – | rsync destination for `ship`, e.g. `ahub@host:` |
+| `AGENT_HISTORY_HUB_KEY` | – | ssh identity file for uploads |
+| `AGENT_HISTORY_REMOTE` | – | `ssh://user@host[:port]` hub to search; merges with local results |
+| `AGENT_HISTORY_REMOTE_KEY` | – | ssh identity file for hub searches |
+| `AGENT_HISTORY_HUB` | – | `1` makes this install a hub: inbox only, redaction forced |
+| `AGENT_HISTORY_INBOX` | – | Directory of `<machine>/*.jsonl` batches (hub) |
+| `AGENT_HISTORY_TENANTS` | `~/tenants` | Root of per-tenant data homes (multi-tenant hub, `serve-ssh --tenants`) |
 
 Switching `AGENT_HISTORY_MODEL` calls for **`agent-history reembed`** —
 vectors from different models are not comparable, and the tool detects the
@@ -670,8 +787,9 @@ The posture that follows:
   `password=` / `token:` / `api_key=`-style assignments. Matching is
   deliberately conservative (git SHAs, UUIDs, hashes, env-var references and
   prose about passwords are kept), so treat it as a strong reduction, not a
-  guarantee. Anything that leaves the machine (#9 bundles, a #25 hub) is
-  meant to be redacted regardless of this setting. `doctor` shows the setting
+  guarantee. Anything that leaves the machine is redacted regardless of this
+  setting: `ship` always redacts, and a [hub](#hub-central-history) enforces
+  it again. `doctor` shows the setting
   and the last run's per-class counts.
 - `index.db` deserves the same handling as `~/.ssh`. It is created `0600`
   inside a `0700` directory — deliberately, since the default umask would
@@ -743,9 +861,12 @@ complete. What remains is driven by use, and tracked in the
   mis-tune it (#13).
 - [ ] **CMMC/CUI hardening** — a strict-mode secret scrub and the rest of the
   gap list toward a regulated deployment (#16).
+- [x] A **hub** deployment: many machines ship redacted records to one
+  index, per tenant, that is searched over ssh ([Hub](#hub-central-history),
+  #25). Still open from #25: an HTTP/MCP API behind an authenticating proxy,
+  and remote-aware injection.
 - [ ] **Multi-machine** merge / snapshot / restore over encrypted object
-  storage (#9), and a **hub** deployment: many machines ship redacted records
-  to one index that is searched remotely (#25).
+  storage (#9).
 - [ ] An approximate vector index if a corpus outgrows exhaustive kNN
   (hundreds of thousands of chunks — remote for a personal index).
 - [ ] Further agents as they appear — one adapter module each.

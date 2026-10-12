@@ -1,0 +1,34 @@
+# ~ahub/.ssh/authorized_keys on the hub. Example only: the keys, tenants and
+# machine names below are placeholders. Every line is pinned to one forced
+# command plus `restrict` (no pty, no forwarding, no agent, no user rc), so a
+# stolen key can do exactly what its line says and nothing else.
+#
+# Layout on the hub (create the directories first; ssh will not):
+#   /home/ahub/inbox/<tenant>/<machine>/     uploads land here
+#   /home/ahub/tenants/<tenant>/             that tenant's index (data home)
+
+# --- Ingest keys: UPLOAD ONLY, one per machine ---------------------------------
+# rrsync -wo = write-only into the one directory named here. The shipper sets
+# AGENT_HISTORY_HUB_INGEST=ahub@hub.example.invalid: and knows nothing of
+# tenants: the key decides where its batches go, and the machine name is the
+# directory (unique per tenant, not globally).
+command="rrsync -wo /home/ahub/inbox/dennis/pc",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-dennis-pc
+command="rrsync -wo /home/ahub/inbox/dennis/claude-rc",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-dennis-claude-rc
+command="rrsync -wo /home/ahub/inbox/dennis/clamps",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-dennis-clamps
+command="rrsync -wo /home/ahub/inbox/soaring-eagle/lexi",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-eagle-lexi
+
+# --- Search keys: READ ONLY, scoped by --tenants -------------------------------
+# serve-ssh runs `search` and `show` and nothing else. --tenants is written
+# here, by the hub's admin; the client cannot widen it. Asking for a tenant
+# outside the list is refused, and `show` only resolves inside it.
+#
+# The user: both tenants, results merged and labelled.
+command="env AGENT_HISTORY_TENANTS=/home/ahub/tenants /home/ahub/.local/bin/agent-history serve-ssh --tenants dennis,soaring-eagle",restrict ssh-ed25519 AAAA_PLACEHOLDER search-dennis
+# The client's agent: its own tenant only.
+command="env AGENT_HISTORY_TENANTS=/home/ahub/tenants /home/ahub/.local/bin/agent-history serve-ssh --tenants soaring-eagle",restrict ssh-ed25519 AAAA_PLACEHOLDER search-eagle-lexi
+
+# --- Single-user hub (no tenants) ----------------------------------------------
+# Skip the tenant directory level, set AGENT_HISTORY_INBOX=/home/ahub/inbox in
+# the one index unit, give ingest keys `rrsync -wo /home/ahub/inbox/<machine>`,
+# and drop --tenants from serve-ssh:
+#   command="/home/ahub/.local/bin/agent-history serve-ssh",restrict ssh-ed25519 AAAA_PLACEHOLDER search
