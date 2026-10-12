@@ -195,4 +195,25 @@ def run(label: str, *, if_changed: bool = False, foreground: bool = False,
             finally:
                 sys.stdout, sys.stderr = original
         config.secure_file(log)
-        return code
+
+    # Shipping needs no embedder and holds its own lock, so it runs after the
+    # index lock is released and never delays the next index run. Its result
+    # does not change the trigger's: the hook is about indexing.
+    if config.hub_ingest() and not config.hub_mode():
+        _ship_logged(log)
+    return code
+
+
+def _ship_logged(log: Path) -> None:
+    from . import ship
+
+    with open(log, "a", encoding="utf-8") as handle:
+        original = sys.stdout, sys.stderr
+        sys.stdout = sys.stderr = handle
+        try:
+            ship.run()
+        except Exception as exc:  # noqa: BLE001 - a hook must never crash loudly
+            handle.write(f"ship failed: {exc}\n")
+        finally:
+            sys.stdout, sys.stderr = original
+    config.secure_file(log)

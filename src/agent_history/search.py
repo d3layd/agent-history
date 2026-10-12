@@ -131,22 +131,32 @@ def run(
     full: bool = False,
     as_json: bool = False,
     where: str | None = None,
+    tenant: str | None = None,
 ) -> int:
     """``where`` is None (decide), "local", or "hub"."""
     side = _side(where, machine)
     if side is None:
+        return 1
+    if tenant and side == "local":
+        print("error: --tenant selects an index on a hub; set "
+              "AGENT_HISTORY_REMOTE", file=sys.stderr)
         return 1
     options = dict(k=k, cwd=cwd, agent=agent, machine=machine,
                    exclude_machine=exclude_machine, mode=mode, sort=sort)
 
     if side == "hub":
         return remote.passthrough(remote.search_args(
-            query, full=full, as_json=as_json, **options))
+            query, full=full, as_json=as_json, tenant=tenant, **options))
 
     results = search_rows(query, **options)
     if side == "both":
-        results = _merge_hub(query, results, full=full, **options)
+        results = _merge_hub(query, results, full=full, tenant=tenant, **options)
+    return emit(results, full=full, as_json=as_json)
 
+
+def emit(results: list[dict], *, full: bool, as_json: bool) -> int:
+    """Print results as JSON or the human format. A tenant is labelled only
+    when the results span more than one — one tenant is just "the index"."""
     if as_json:
         print(json.dumps([_trim(dict(r), full) for r in results], indent=2))
         return 0
@@ -155,8 +165,9 @@ def run(
         print("(no matches)")
         return 0
 
+    label = len({r["tenant"] for r in results if r.get("tenant")}) > 1
     for position, result in enumerate(results, 1):
-        _print_row(position, result, full)
+        _print_row(position, result, full, label_tenant=label)
     return 0
 
 
@@ -179,7 +190,7 @@ def _side(where: str | None, machine: str | None) -> str | None:
 
 def _merge_hub(query: str, local: list[dict], *, full: bool, k: int,
                exclude_machine: list[str] | None, sort: str,
-               **options) -> list[dict]:
+               tenant: str | None = None, **options) -> list[dict]:
     """Interleave hub results into ``local`` by reciprocal-rank fusion.
 
     The hub is asked to leave out this machine's own chunks, so the two lists
@@ -192,19 +203,26 @@ def _merge_hub(query: str, local: list[dict], *, full: bool, k: int,
     try:
         hub = remote.query_json(remote.search_args(
             query, k=k, exclude_machine=skip, sort=sort, full=full,
-            as_json=True, **options))
+            as_json=True, tenant=tenant, **options))
     except remote.RemoteError as exc:
         print(f"warning: hub unavailable ({exc}); showing local results only",
               file=sys.stderr)
         return local
 
+    return fuse([local, [{**_HUB_DEFAULTS, **r} for r in hub]], sort=sort, k=k)
+
+
+def fuse(lists: list[list[dict]], *, sort: str, k: int) -> list[dict]:
+    """Interleave independently ranked result lists by reciprocal-rank
+    fusion: each hit scores 1/(60+rank) in its own list, equal ranks fall to
+    the newer chunk, and repeats are dropped."""
     seen: set[tuple] = set()
     fused: list[dict] = []
-    for results in (local, hub):
+    for results in lists:
         for rank, result in enumerate(results):
-            result = {**_HUB_DEFAULTS, **result, "score": 1.0 / (60 + rank)}
+            result = {**result, "score": 1.0 / (60 + rank)}
             key = (result["file"], result["session_id"], result["timestamp"],
-                   result["text"][:200])
+                   result["text"][:200], result.get("tenant"))
             if key not in seen:
                 seen.add(key)
                 fused.append(result)
@@ -239,7 +257,8 @@ def _trim(result: dict, full: bool) -> dict:
     return result
 
 
-def _print_row(position: int, result: dict, full: bool) -> None:
+def _print_row(position: int, result: dict, full: bool,
+               label_tenant: bool = False) -> None:
     if result["score"] is not None:
         ranking = f"score={result['score']:.4f}"
     elif result["distance"] is not None:
@@ -250,6 +269,8 @@ def _print_row(position: int, result: dict, full: bool) -> None:
     where = ""
     if result.get("machine") and result["machine"] != config.machine_id():
         where = f"  @{result['machine']}"
+    if label_tenant and result.get("tenant"):
+        where += f"  [{result['tenant']}]"
     print(
         f"#{position}  {ranking}  {timestamp}  "
         f"{result['agent']}/{result['role']}  {result['cwd'] or '?'}{where}"

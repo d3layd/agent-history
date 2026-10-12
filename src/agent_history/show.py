@@ -55,21 +55,32 @@ def rows_for(target: str, *, around: str | None = None,
 
 
 def run(target: str, *, around: str | None = None, limit: int = 40,
-        as_json: bool = False, where: str | None = None) -> int:
+        as_json: bool = False, where: str | None = None,
+        tenant: str | None = None) -> int:
     """``where`` is None (local first, then the hub), "local", or "hub"."""
     configured = config.remote_url()
     if where == "hub" and not configured:
         print("error: --hub needs AGENT_HISTORY_REMOTE=ssh://user@host",
               file=sys.stderr)
         return 1
+    if tenant and (not configured or where == "local"):
+        print("error: --tenant selects an index on a hub; set "
+              "AGENT_HISTORY_REMOTE", file=sys.stderr)
+        return 1
     rows: list[dict] = []
     if where == "local" or not configured or (
-            where is None and config.db_path().exists()):
+            where is None and not tenant and config.db_path().exists()):
         rows = rows_for(target, around=around, limit=limit)
     if not rows and configured and where != "local":
         # A hit from another machine is not in the local index; the hub has it.
         return remote.passthrough(remote.show_args(
-            target, around=around, limit=limit, as_json=as_json))
+            target, around=around, limit=limit, as_json=as_json, tenant=tenant))
+    return render(target, rows, as_json=as_json)
+
+
+def render(target: str, rows: list[dict], *, as_json: bool,
+           tenant: str | None = None) -> int:
+    """Print a conversation. ``tenant`` is labelled when a hub serves several."""
     if not rows:
         print(f"(nothing indexed for {target!r} — pass an origin path or "
               "session id exactly as search printed it)")
@@ -82,6 +93,8 @@ def run(target: str, *, around: str | None = None, limit: int = 40,
     first = rows[0]
     elsewhere = (f"  machine={first['machine']}"
                  if first["machine"] != config.machine_id() else "")
+    if tenant:
+        elsewhere += f"  tenant={tenant}"
     print(f"{first['agent']}  session={first['session_id']}  "
           f"cwd={first['cwd'] or '?'}{elsewhere}")
     print(f"origin: {first['file']}")

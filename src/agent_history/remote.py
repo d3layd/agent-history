@@ -62,10 +62,12 @@ def ssh_argv(command: list[str]) -> list[str]:
 
 def search_args(query: str, *, k: int, cwd: str | None, agent: str | None,
                 machine: str | None, exclude_machine: list[str] | None,
-                mode: str, sort: str, full: bool, as_json: bool) -> list[str]:
+                mode: str, sort: str, full: bool, as_json: bool,
+                tenant: str | None = None) -> list[str]:
     """The ``search`` command line to run on the hub for these options."""
     out = ["search", "-k", str(k), "--mode", mode, "--sort", sort]
-    for flag, value in (("--cwd", cwd), ("--agent", agent), ("--machine", machine)):
+    for flag, value in (("--cwd", cwd), ("--agent", agent),
+                        ("--machine", machine), ("--tenant", tenant)):
         if value:
             out += [flag, value]
     for name in exclude_machine or ():
@@ -78,8 +80,10 @@ def search_args(query: str, *, k: int, cwd: str | None, agent: str | None,
 
 
 def show_args(target_: str, *, around: str | None, limit: int,
-              as_json: bool) -> list[str]:
+              as_json: bool, tenant: str | None = None) -> list[str]:
     out = ["show", "--limit", str(limit)]
+    if tenant:
+        out += ["--tenant", tenant]
     if around:
         out += ["--around", around]
     if as_json:

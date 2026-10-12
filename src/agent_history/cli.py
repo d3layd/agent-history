@@ -7,11 +7,11 @@ import json
 import sys
 
 from . import (__version__, adapters, config, embed, index, inject, scrub,
-               search, show, store, trigger, viewer)
+               search, ship, show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub"}
+            "purge", "strict", "scrub", "ship", "serve-ssh"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -66,6 +66,24 @@ def _build_parser() -> argparse.ArgumentParser:
     trig.add_argument("--foreground", action="store_true",
                       help="wait for indexing instead of detaching")
 
+    shp = sub.add_parser(
+        "ship", help="send redacted records to the hub "
+                     "(AGENT_HISTORY_HUB_INGEST)")
+    shp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="report what would be sent; write and upload nothing")
+    shp.add_argument("--backfill-from-index", action="store_true",
+                     dest="backfill",
+                     help="also send chunks already in the local index "
+                          "(covers transcripts no longer on disk)")
+
+    ssh = sub.add_parser(
+        "serve-ssh",
+        help="for authorized_keys command=: run only search/show from "
+             "$SSH_ORIGINAL_COMMAND")
+    ssh.add_argument("--tenants", metavar="A[,B...]",
+                     help="tenant indexes this key may read (hub only); "
+                          "taken from the forced command, never from the client")
+
     find = sub.add_parser("search", help="search the index")
     find.add_argument("query", nargs="+")
     find.add_argument("-k", type=int, default=8, help="results to return (default 8)")
@@ -75,6 +93,12 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="hybrid (default), vector, or text (no Ollama needed)")
     find.add_argument("--sort", choices=search.SORTS, default="relevance",
                       help="relevance (default; near-ties favour newer) or newest")
+    find.add_argument("--machine", help="only chunks from this machine")
+    find.add_argument("--exclude-machine", action="append", metavar="MACHINE",
+                      help="leave out chunks from this machine (repeatable)")
+    find.add_argument("--tenant", help="hub tenant to search (default: all "
+                                       "this key may read)")
+    _add_where(find)
     find.add_argument("--full", action="store_true", help="print full chunk text")
     find.add_argument("--json", action="store_true", dest="as_json")
 
@@ -86,6 +110,8 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="centre the window on this timestamp instead of the end")
     ctx.add_argument("--limit", type=int, default=40,
                      help="chunks to print (default 40)")
+    ctx.add_argument("--tenant", help="hub tenant the conversation is in")
+    _add_where(ctx)
     ctx.add_argument("--json", action="store_true", dest="as_json")
 
     serve = sub.add_parser(
@@ -106,6 +132,15 @@ def _build_parser() -> argparse.ArgumentParser:
                      choices=["add", "remove", "list"])
     doc.add_argument("path", nargs="?", help="directory, for add/remove")
     return parser
+
+
+def _add_where(parser: argparse.ArgumentParser) -> None:
+    """--local / --hub: pin a command to one side when AGENT_HISTORY_REMOTE is set."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--local", dest="where", action="store_const",
+                       const="local", help="only this machine's index")
+    group.add_argument("--hub", dest="where", action="store_const",
+                       const="hub", help="only the hub (AGENT_HISTORY_REMOTE)")
 
 
 def _port(value: str) -> int:
@@ -260,6 +295,15 @@ def _cmd_doctor() -> int:
                              else "off — secrets are indexed verbatim "
                                   "(AGENT_HISTORY_REDACT=on or strict to enable)"))
 
+    print(f"machine:    {config.machine_id()}")
+    if config.hub_mode():
+        print(f"hub:        THIS install is a hub (inbox {config.inbox_dir()}; "
+              "redaction forced)")
+    if config.hub_ingest():
+        print(f"ship to:    {config.hub_ingest()}  (agent-history ship)")
+    if config.remote_url():
+        print(f"search hub: {config.remote_url()}")
+
     ok, detail = embed.reachable()
     print(f"ollama up:  {'yes' if ok else 'NO'} ({detail})")
 
@@ -298,6 +342,9 @@ def _cmd_doctor() -> int:
     print(f"chunks:     {info['total']}")
     for agent, count in info["per_agent"].items():
         print(f"              {agent}: {count}")
+    if len(info["per_machine"]) > 1:
+        for name, count in info["per_machine"].items():
+            print(f"              @{name}: {count}")
     print(f"built with: {info['model']} ({info['dimension']}-dim)")
     last = store.get_meta(db, "redact_last")
     if last:
@@ -330,7 +377,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(_normalise(list(sys.argv[1:] if argv is None else argv)))
+    return dispatch(parser, args)
 
+
+def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run a parsed command. Shared with `serve-ssh`, which parses its own."""
     if args.command is None:
         parser.print_help()
         return 0
@@ -358,14 +409,24 @@ def main(argv: list[str] | None = None) -> int:
                 k=args.k,
                 cwd=args.cwd,
                 agent=args.agent,
+                machine=args.machine,
+                exclude_machine=args.exclude_machine,
                 mode=args.mode,
                 sort=args.sort,
                 full=args.full,
                 as_json=args.as_json,
+                where=args.where,
+                tenant=args.tenant,
             )
         if args.command == "show":
             return show.run(args.target, around=args.around,
-                            limit=args.limit, as_json=args.as_json)
+                            limit=args.limit, as_json=args.as_json,
+                            where=args.where, tenant=args.tenant)
+        if args.command == "ship":
+            return ship.run(dry_run=args.dry_run, backfill=args.backfill)
+        if args.command == "serve-ssh":
+            from . import serve_ssh
+            return serve_ssh.run(args.tenants)
         if args.command == "serve":
             return viewer.run(port=args.port)
         if args.command == "inject":
