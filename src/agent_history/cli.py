@@ -6,10 +6,10 @@ import datetime
 import sys
 
 from . import (__version__, adapters, config, embed, index, inject, search,
-               show, store, trigger, viewer)
+               sessions, show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
-            "datadir", "trigger", "show", "serve", "inject", "docs",
+            "datadir", "trigger", "show", "sessions", "serve", "inject", "docs",
             "purge", "strict"}
 
 
@@ -81,6 +81,17 @@ def _build_parser() -> argparse.ArgumentParser:
     ctx.add_argument("--limit", type=int, default=40,
                      help="chunks to print (default 40)")
     ctx.add_argument("--json", action="store_true", dest="as_json")
+
+    recent = sub.add_parser(
+        "sessions", help="list the most recently active sessions")
+    recent.add_argument("-n", "--limit", type=int, default=20,
+                        help="sessions to list (default 20)")
+    recent.add_argument("--agent", help="only one agent, e.g. claude-code")
+    recent.add_argument("--cwd", help="filter by substring of the session's directory")
+    recent.add_argument("--all", action="store_true", dest="include_pseudo",
+                        help="also list memory files, docs and subagent "
+                             "transcripts (hidden by default)")
+    recent.add_argument("--json", action="store_true", dest="as_json")
 
     serve = sub.add_parser(
         "serve", help="local web viewer on 127.0.0.1 (loopback only)")
@@ -345,6 +356,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "show":
             return show.run(args.target, around=args.around,
                             limit=args.limit, as_json=args.as_json)
+        if args.command == "sessions":
+            return sessions.run(limit=args.limit, cwd=args.cwd,
+                                agent=args.agent,
+                                include_pseudo=args.include_pseudo,
+                                as_json=args.as_json)
         if args.command == "serve":
             return viewer.run(port=args.port)
         if args.command == "inject":

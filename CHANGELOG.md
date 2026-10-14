@@ -9,6 +9,18 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [Unreleased]
+
+### Added
+- **`agent-history sessions`** lists the most recently active sessions,
+  newest first — one line each with last-active time (local), agent (plus
+  `@machine` when the index records one), session id, directory, and the
+  first user prompt. `-n/--limit` (default 20), `--agent`, `--cwd`
+  substring, `--json`. Memory files, docs, and Claude Code subagent
+  transcripts are hidden by default (they share session ids without being
+  conversations; a subagent's chunks would otherwise bump its parent's
+  activity and replace its first prompt); `--all` includes them (#28).
+
 ## [0.15.0] — 2026-08-10
 
 ### Changed
