@@ -5,8 +5,8 @@ import argparse
 import datetime
 import sys
 
-from . import (__version__, adapters, config, embed, index, inject, search,
-               show, store, trigger, viewer)
+from . import (__version__, adapters, config, coverage, embed, index, inject,
+               search, show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
@@ -49,7 +49,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("sources", help="print the directories that will be scanned")
     sub.add_parser("datadir", help="print the data directory (index, log, lock)")
-    sub.add_parser("doctor", help="diagnose the installation")
+    doc_cmd = sub.add_parser("doctor", help="diagnose the installation")
+    doc_cmd.add_argument(
+        "--coverage", action="store_true",
+        help="compare what is on disk with what is indexed, per source, and "
+             "flag empty or truncated transcripts (read-only)")
+    doc_cmd.add_argument("--lag-hours", type=float,
+                         default=coverage.LAG_WARN_HOURS, dest="lag_hours",
+                         help="with --coverage: warn when a source is this "
+                              f"far ahead of the index (default "
+                              f"{coverage.LAG_WARN_HOURS:g})")
+    doc_cmd.add_argument("--json", action="store_true", dest="as_json",
+                         help="with --coverage: machine-readable output")
 
     trig = sub.add_parser(
         "trigger", help="index in the background (used by editor hooks)")
@@ -330,6 +341,11 @@ def main(argv: list[str] | None = None) -> int:
             print(config.data_home())
             return 0
         if args.command == "doctor":
+            if args.coverage:
+                return coverage.run(as_json=args.as_json,
+                                    lag_hours=args.lag_hours)
+            if args.as_json:
+                parser.error("doctor --json needs --coverage")
             return _cmd_doctor()
         if args.command == "search":
             return search.run(

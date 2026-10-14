@@ -9,6 +9,20 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [Unreleased]
+
+### Added
+- **`agent-history doctor --coverage`** — what is on disk versus what reached
+  the index, per source (Claude Code roots incl. the WSL→Windows profile and
+  extra dirs, Codex, OpenCode, Hermes, OpenClaw, docs): counts on disk and
+  indexed, indexed files now gone from disk, and newest source mtime against
+  newest indexed timestamp with a lag warning (`--lag-hours`, default 6). It
+  flags suspect transcripts — 0-byte, last line not valid JSON (torn by a
+  crash), and near-empty session stubs — showing the remote-control
+  `bridgeSessionId` where it can be found so they can be re-fetched, and lists
+  the surfaces no adapter can see. Strictly read-only (`mode=ro`); `--json`
+  for scripts; exits 1 when something needs attention. (#28)
+
 ## [0.15.0] — 2026-08-10
 
 ### Changed
