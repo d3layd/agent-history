@@ -268,6 +268,33 @@ def openclaw_dirs() -> list[Path]:
     return [Path.home() / ".openclaw"]
 
 
+# Where Claude desktop keeps Cowork (local agent mode) sessions, relative to
+# the per-user roaming app-data directory (%APPDATA% on Windows).
+_COWORK_SUBDIR = "Claude/local-agent-mode-sessions"
+
+
+def cowork_dirs() -> list[Path]:
+    """Claude desktop Cowork session roots (local-agent-mode-sessions).
+
+    Claude desktop runs on Windows and macOS, never natively inside WSL, so
+    the default is the native app-data location plus — from WSL — the
+    Windows profile selected by the same one-profile rule as the other
+    adapters, keyed on the Cowork directory itself.
+    """
+    explicit = _env("AGENT_HISTORY_COWORK_DIRS")
+    if explicit:
+        return [Path(p).expanduser() for p in explicit.split(os.pathsep) if p.strip()]
+    dirs: list[Path] = []
+    appdata = os.environ.get("APPDATA") if WINDOWS else None
+    if appdata:
+        dirs.append(Path(appdata) / _COWORK_SUBDIR)
+    elif sys.platform == "darwin":
+        dirs.append(Path.home() / "Library/Application Support" / _COWORK_SUBDIR)
+    marker = f"AppData/Roaming/{_COWORK_SUBDIR}"
+    dirs += [home / marker for home in wsl_windows_homes(marker=marker)]
+    return dirs
+
+
 def docs_dirs_file() -> Path:
     """Persisted docs roots, one per line — managed by `agent-history docs`.
 

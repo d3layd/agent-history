@@ -72,36 +72,7 @@ class ClaudeCodeAdapter:
     # ---------------------------------------------------------------- parsing
 
     def _read_transcript(self, path: Path) -> Iterator[Record]:
-        try:
-            handle = path.open(encoding="utf-8", errors="replace")
-        except OSError:
-            return
-        with handle as lines:
-            for line in lines:
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(entry, dict) or entry.get("isMeta"):
-                    continue
-                role = entry.get("type")
-                if role not in ("user", "assistant"):
-                    continue
-                for text in _texts(entry.get("message") or {}):
-                    text = text.strip()
-                    if len(text) < MIN_CHARS:
-                        continue
-                    if text.startswith(SKIP_PREFIXES):
-                        continue
-                    yield Record(
-                        agent=AGENT,
-                        origin=str(path),
-                        session_id=entry.get("sessionId") or "",
-                        cwd=entry.get("cwd") or "",
-                        timestamp=entry.get("timestamp", ""),
-                        role=role,
-                        text=scrub(text),
-                    )
+        yield from read_transcript(path)
 
     def _read_memory(self, path: Path) -> Iterator[Record]:
         try:
@@ -122,6 +93,57 @@ class ClaudeCodeAdapter:
         )
 
 
+def read_transcript(
+    path: Path,
+    agent: str = AGENT,
+    session_id: str = "",
+    cwd: str = "",
+) -> Iterator[Record]:
+    """Parse one Claude Code JSONL transcript.
+
+    Shared with adapters whose agents embed Claude Code (Cowork). `session_id`
+    and `cwd` are fallbacks for lines that lack their own — except a non-empty
+    `cwd` passed here wins, for hosts whose in-transcript cwd is a sandbox path.
+    """
+    try:
+        handle = path.open(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    with handle as lines:
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or entry.get("isMeta"):
+                continue
+            role = entry.get("type")
+            if role not in ("user", "assistant"):
+                continue
+            message = entry.get("message")
+            if not isinstance(message, dict):
+                continue
+            for text in _texts(message):
+                text = text.strip()
+                if len(text) < MIN_CHARS:
+                    continue
+                if text.startswith(SKIP_PREFIXES):
+                    continue
+                yield Record(
+                    agent=agent,
+                    origin=str(path),
+                    session_id=_str(entry.get("sessionId")) or session_id,
+                    cwd=cwd or _str(entry.get("cwd")),
+                    timestamp=_str(entry.get("timestamp")),
+                    role=role,
+                    text=scrub(text),
+                )
+
+
+def _str(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def _texts(message: dict) -> Iterator[str]:
     """Yield the text of a message, whether it is a plain string or blocks."""
     content = message.get("content")
@@ -130,7 +152,7 @@ def _texts(message: dict) -> Iterator[str]:
     elif isinstance(content, list):
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
-                yield block.get("text") or ""
+                yield _str(block.get("text"))
 
 
 def _dedupe(paths: list[Path]) -> list[Path]:
