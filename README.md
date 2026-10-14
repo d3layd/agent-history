@@ -192,6 +192,7 @@ $ agent-history purge --all --yes           # total destruction
 $ agent-history reindex --force             # wipe and rebuild (destructive)
 $ agent-history sources                     # what will be scanned
 $ agent-history doctor                      # diagnose the installation
+$ agent-history doctor --coverage           # on disk vs indexed, torn transcripts
 ```
 
 A search hit is a chunk; `show` prints the conversation it came from.
@@ -202,6 +203,41 @@ outranks its own correction when relevance genuinely separates them.
 chronologically instead — useful for "what's the latest on X". Start
 with `doctor` if anything misbehaves — it reports whether Ollama is reachable,
 what was detected, how much is indexed, and flags misconfigured docs roots.
+
+### Coverage: what never made it into the index
+
+`doctor --coverage` answers "would a search even see it?" before a search
+quietly comes back empty. It is read-only (the index is opened with SQLite
+`mode=ro`) and looks exactly where indexing looks, because it asks the
+adapters for their sources. It reports:
+
+- **Per source** — each adapter root, including the WSL→Windows profile and
+  `AGENT_HISTORY_EXTRA_DIRS`: files (or, for OpenCode/Hermes, sessions) on
+  disk versus in the index, how many indexed files have since vanished from
+  disk (the index is their only copy), and the newest source mtime against
+  the newest indexed timestamp. A gap over `--lag-hours` (default 6) is a
+  warning: indexing is not reaching that source.
+- **Suspect transcripts** — 0-byte files, files whose last line is not valid
+  JSON (cut off mid-write by a crash), and session files under 2 KiB that
+  hold no conversation. For Claude Code remote-control sessions the
+  `bridgeSessionId` is shown — from the transcript itself or from
+  `~/.claude/sessions/*.json` — so the conversation can be re-fetched later.
+- **Surfaces no adapter can see** — claude.ai chats, claude.ai/code cloud
+  sessions, Claude Desktop Cowork, and other machines in your fleet.
+
+```console
+$ agent-history doctor --coverage
+claude-code ~/.claude/projects
+    1174 files on disk, 1086 indexed, 2686 gone from disk (index-only)
+    newest source 2026-10-14 12:58 · newest indexed 2026-10-14 11:59 · ok
+...
+suspect transcripts: 1 empty, 5 truncated (last line not JSON), 6 short (< 2.0 KiB)
+  EMPTY     /mnt/c/Users/me/.claude/projects/C--Users-me/29446839-….jsonl  0 B  2026-10-13 20:41
+```
+
+It exits 1 when a source lags or a transcript is empty or truncated (short
+stubs alone do not fail it), so it can run from cron. `--json` prints the full
+report, including every suspect file.
 
 ## Context injection (on by default)
 
