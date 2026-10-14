@@ -32,6 +32,7 @@ that knows where that agent keeps its transcripts and how to read them:
 | source | reads | format |
 |---|---|---|
 | **Claude Code** | `~/.claude/projects/**` + project memory `*.md`, including the WSL Windows side | JSONL |
+| **Claude desktop Cowork** | `local-agent-mode-sessions/**` under Claude desktop's app data (`%APPDATA%\Claude`, `~/Library/Application Support/Claude`), including the WSL Windows side — format undocumented, see [below](#claude-desktop-cowork) | JSONL |
 | **OpenAI Codex CLI** | `~/.codex/sessions/**` rollouts, including the WSL Windows side | JSONL |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite |
 | **Hermes** | `~/.hermes*/state.db`, one per profile | SQLite |
@@ -592,6 +593,7 @@ is no daemon, no server, and no separate process to keep alive.
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama endpoint |
 | `AGENT_HISTORY_ALLOW_REMOTE` | – | Set to `1` to permit a non-loopback `OLLAMA_URL` |
 | `AGENT_HISTORY_PROJECTS` | `~/.claude/projects` | Claude Code transcript root |
+| `AGENT_HISTORY_COWORK_DIRS` | Claude desktop's `local-agent-mode-sessions` | Cowork session roots, os.pathsep-separated |
 | `AGENT_HISTORY_CODEX` | `~/.codex/sessions` | Codex rollout root |
 | `AGENT_HISTORY_OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | OpenCode database |
 | `AGENT_HISTORY_HERMES_DIRS` | `~/.hermes*` | Hermes profile homes, os.pathsep-separated |
@@ -640,12 +642,30 @@ Install and sync with the PowerShell equivalents:
 
 ### WSL
 
-When running inside WSL, transcripts written by Claude Code or Codex on the
-Windows host are picked up automatically, so one index covers both sides. WSL
+When running inside WSL, transcripts written by Claude Code, Claude desktop
+Cowork or Codex on the Windows host are picked up automatically, so one index covers both sides. WSL
 cannot tell which Windows account is yours, so a profile is selected only
 when exactly one under `/mnt/c/Users` has that agent's transcripts; if
 several do, none is chosen and you are told to name one via
 `AGENT_HISTORY_EXTRA_DIRS`. Set `AGENT_HISTORY_NO_WSL=1` to opt out entirely.
+
+### Claude desktop Cowork
+
+Cowork (Claude desktop's local agent mode) runs an embedded Claude Code in a
+sandbox and keeps each session under `local-agent-mode-sessions/<account>/<org>/`:
+a `local_<id>.json` metadata file beside a `local_<id>/` directory whose
+`.claude/projects/` holds ordinary Claude Code JSONL (subagents included).
+Those transcripts are indexed as agent `claude-cowork`; the sibling
+`audit.jsonl` repeats the same dialogue as SDK events and is not read. The
+in-transcript cwd is the sandbox's own path, so a folder you mounted into the
+session, when the metadata names one, is used as the cwd instead.
+
+**This layout is undocumented and not a stable interface** — it is reverse
+engineered from sessions written between 2026-02 and 2026-06 and may change
+with any Claude desktop release. The adapter skips anything that does not
+match rather than failing the run; if Cowork sessions stop showing up after
+an update, that is the likely cause. Set `AGENT_HISTORY_COWORK_DIRS` to point
+it somewhere else.
 
 ## Privacy and security
 

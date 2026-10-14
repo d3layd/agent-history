@@ -9,6 +9,20 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [Unreleased]
+
+### Added
+- **Claude desktop Cowork adapter** (`claude-cowork`, #28). Cowork (local
+  agent mode) sessions under Claude desktop's `local-agent-mode-sessions`
+  directory are now indexed — natively on Windows and macOS, and from WSL via
+  the same one-profile rule as the other adapters. Each session's embedded
+  Claude Code transcripts (subagents included) are read with the Claude Code
+  parser; the duplicate `audit.jsonl` event stream is skipped. A folder the
+  user mounted into the session replaces the sandbox-internal cwd. Override
+  the location with `AGENT_HISTORY_COWORK_DIRS` (os.pathsep-separated). The
+  on-disk format is undocumented and may change between Claude desktop
+  releases, so unrecognised shapes are skipped rather than raised.
+
 ## [0.15.0] — 2026-08-10
 
 ### Changed
