@@ -308,7 +308,7 @@ def query(
     Filters are applied after the vector search, so we over-fetch when one is
     present to avoid returning fewer than k results.
     """
-    fetch = k * 4 if (cwd or agent) else k
+    fetch = min(k * 4 if (cwd or agent) else k, _VEC_K_MAX)
     rows = db.execute(
         "SELECT c.agent, c.origin, c.session_id, c.cwd, c.timestamp, c.role, "
         "       c.text, v.distance "
@@ -322,6 +322,20 @@ def query(
 
 
 _ROW_COLS = "c.agent, c.origin, c.session_id, c.cwd, c.timestamp, c.role, c.text"
+_VEC_K_MAX = 4096  # sqlite-vec's cap on k
+
+# Skipped by the OR fallback only, so "the/a/in" can't pull in every chunk.
+# The strict AND match still uses every term.
+_STOPWORDS = frozenset(
+    "a an and are as at be but by can could did do does for from had has have "
+    "how i if in into is it its me my no not of on or our so than that the "
+    "their them then there these they this to too us was we were what when "
+    "where which who why will with would you your".split()
+)
+
+
+def _quote(term: str) -> str:
+    return '"' + term.replace('"', '""') + '"'
 
 
 def text_query(
@@ -334,26 +348,48 @@ def text_query(
 ) -> list[tuple]:
     """BM25-ranked full-text matches, same row shape as query() minus distance.
 
-    The query is quoted term-by-term so FTS5 operator syntax in ordinary
-    prose ("don't", "a-b", stray quotes) cannot break the MATCH expression.
+    Chunks containing every term come first. If there are fewer than k of
+    those, the rest are filled from chunks containing any non-stopword term,
+    also BM25-ranked — otherwise a natural-language query, which rarely has
+    every word in one chunk, would match nothing at all.
+
+    Each term is quoted so FTS5 operator syntax in ordinary prose ("don't",
+    "a-b", stray quotes) cannot break the MATCH expression. Tokens with no
+    letters or digits ("—", "->") are dropped: they index to nothing.
     """
     if not fts_enabled(db):
         return []
-    terms = [t for t in query.split() if t]
+    terms = [t for t in query.split() if any(ch.isalnum() for ch in t)]
     if not terms:
         return []
-    match = " ".join('"' + t.replace('"', '""') + '"' for t in terms)
     fetch = k * 4 if (cwd or agent) else k
+
+    hits = _match(db, " ".join(map(_quote, terms)), fetch, cwd=cwd, agent=agent)
+    if len(hits) < k:
+        loose = [t for t in terms if t.lower() not in _STOPWORDS] or terms
+        if len(loose) > 1 or loose != terms:
+            # AND matches are a subset of these, so look past them.
+            more = _match(db, " OR ".join(map(_quote, loose)), fetch + len(hits),
+                          cwd=cwd, agent=agent)
+            for rowid, row in more.items():
+                hits.setdefault(rowid, row)
+    return list(hits.values())[:k]
+
+
+def _match(db: sqlite3.Connection, match: str, limit: int, *,
+           cwd: str | None, agent: str | None) -> dict[int, tuple]:
+    """Filtered FTS rows keyed by chunk id, best BM25 first."""
     try:
         rows = db.execute(
-            f"SELECT {_ROW_COLS} "
+            f"SELECT c.id, {_ROW_COLS} "
             "FROM fts_chunks f JOIN chunks c ON c.id = f.rowid "
             "WHERE fts_chunks MATCH ? ORDER BY rank LIMIT ?",
-            (match, fetch),
+            (match, limit),
         ).fetchall()
     except sqlite3.OperationalError:
-        return []
-    return _filter(rows, cwd=cwd, agent=agent)[:k]
+        return {}
+    return {row[0]: row[1:] for row in rows
+            if _filter([row[1:]], cwd=cwd, agent=agent)}
 
 
 def hybrid_query(
@@ -370,9 +406,14 @@ def hybrid_query(
     Each list contributes 1/(60+rank) per hit; a chunk found by both ranks
     above one found by either alone. Returns rows shaped like query() with an
     RRF score appended: (..., distance | None, score).
+
+    Both lists are pulled much deeper than k: a chunk that is only middling
+    in each list (say rank 30 in both) should beat one that tops a single
+    list, and it can only do that if both lists reach it.
     """
-    vec_rows = query(db, vector, k * 2, cwd=cwd, agent=agent)
-    txt_rows = text_query(db, query_text, k * 2, cwd=cwd, agent=agent)
+    pool = max(k * 10, 50)
+    vec_rows = query(db, vector, pool, cwd=cwd, agent=agent)
+    txt_rows = text_query(db, query_text, pool, cwd=cwd, agent=agent)
 
     scored: dict[tuple, list] = {}
     for rank, row in enumerate(vec_rows):
