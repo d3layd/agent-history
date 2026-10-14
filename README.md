@@ -176,6 +176,8 @@ $ agent-history search "query" --sort newest   # chronological, not relevance
 $ agent-history search "query" --json       # machine-readable
 $ agent-history "query"                     # `search` is the default
 
+$ agent-history sessions                    # the 20 most recently active sessions
+$ agent-history sessions -n 50 --cwd myapp  # more, from one directory (--json too)
 $ agent-history show <session-or-origin>    # the conversation around a hit
 $ agent-history show s1 --around 2026-06-14T22:03  # centred on a timestamp
 $ agent-history serve                       # web viewer at http://127.0.0.1:8127

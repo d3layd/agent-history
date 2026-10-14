@@ -416,6 +416,79 @@ def session_rows(
     ).fetchall()
 
 
+# Chunks that share a session id without being a conversation of their own:
+# memory files and docs get synthetic `memory:` / `doc:` ids, and Claude Code
+# subagent transcripts carry their parent's session id. Both separators are
+# matched because a native-Windows origin keeps its backslashes.
+_PSEUDO_SESSION = (
+    "(c.session_id LIKE 'memory:%' OR c.session_id LIKE 'doc:%' "
+    "OR c.origin LIKE '%/subagents/%' OR c.origin LIKE '%\\subagents\\%')"
+)
+
+
+def has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column
+               for row in db.execute(f"PRAGMA table_info({table})"))
+
+
+def session_summaries(
+    db: sqlite3.Connection,
+    *,
+    cwd: str | None = None,
+    agent: str | None = None,
+    include_pseudo: bool = False,
+) -> list[tuple]:
+    """One row per session: (agent, session_id, cwd, last_timestamp, machine).
+
+    Unordered — the caller sorts, because timestamps from different adapters
+    are not lexicographically comparable. Within one session they are (one
+    adapter wrote them all), so max() picks the latest chunk, and SQLite's
+    bare-column rule makes cwd/machine come from that same row. `machine`
+    is None on indexes without the column (it arrives with the 0.17 hub).
+    """
+    machine = "c.machine" if has_column(db, "chunks", "machine") else "NULL"
+    where, params = ["c.session_id != ''"], []
+    if not include_pseudo:
+        where.append(f"NOT {_PSEUDO_SESSION}")
+    if agent:
+        where.append("c.agent = ?")
+        params.append(agent)
+    if cwd:
+        where.append("instr(c.cwd, ?) > 0")  # same substring rule as search
+        params.append(cwd)
+    return db.execute(
+        f"SELECT c.agent, c.session_id, c.cwd, max(c.timestamp), {machine} "
+        f"FROM chunks c WHERE {' AND '.join(where)} "
+        "GROUP BY c.agent, c.session_id",
+        params,
+    ).fetchall()
+
+
+def first_prompts(
+    db: sqlite3.Connection,
+    session_ids: list[str],
+    *,
+    include_pseudo: bool = False,
+) -> dict[str, str]:
+    """The earliest user chunk of each given session, keyed by session id.
+
+    Subagent chunks are skipped unless `include_pseudo`, so a session's first
+    prompt is what the user typed, not a task the agent handed a subagent.
+    """
+    if not session_ids:
+        return {}
+    marks = ",".join("?" * len(session_ids))
+    where = [f"c.session_id IN ({marks})", "c.role = 'user'"]
+    if not include_pseudo:
+        where.append(f"NOT {_PSEUDO_SESSION}")
+    rows = db.execute(
+        f"SELECT c.session_id, min(c.timestamp), c.text FROM chunks c "
+        f"WHERE {' AND '.join(where)} GROUP BY c.session_id",
+        session_ids,
+    ).fetchall()
+    return {session_id: text for session_id, _first, text in rows}
+
+
 def _delete_rows(db: sqlite3.Connection, rows: list[tuple]) -> int:
     """Delete (id, text) rows from chunks, vec_chunks, and fts_chunks."""
     fts = fts_enabled(db)
