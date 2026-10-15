@@ -6,7 +6,6 @@ the suite never touches a real index and never needs Ollama running.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest

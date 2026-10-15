@@ -30,6 +30,12 @@ class Record:
     # Which machine the message came from. None means "this one"; only the hub
     # inbox sets it, from the directory a shipper uploaded into.
     machine: str | None = None
+    # The session's uid when the source already knows it — only shipped
+    # records carry one; everything else is derived (see sessions.py).
+    session_uid: str | None = None
+    # (kind, value) links to the session's other ids, found on hard
+    # evidence by the adapter, e.g. ("cse", "cse_01…") for remote control.
+    aliases: tuple[tuple[str, str], ...] = ()
 
 
 @runtime_checkable

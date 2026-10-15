@@ -6,14 +6,16 @@ transcript — deliberately, because for a mature index most transcripts no
 longer exist on disk, and the index is the only surviving copy.
 
 The target is whatever a search result printed: an origin (file path or
-db:... reference) or a session id.
+db:... reference), a session uid, or any id the session is known by — the
+raw source id (what `claude --resume` takes) or a linked alias such as a
+remote-control `session_…` id. Linked sessions are shown as one.
 """
 from __future__ import annotations
 
 import json
 import sys
 
-from . import config, remote, store
+from . import config, remote, sessions, store
 
 PER_CHUNK_CHARS = 2000
 
@@ -23,7 +25,13 @@ def rows_for(target: str, *, around: str | None = None,
     """Chunks of the conversation `target` belongs to, oldest first."""
     limit = max(1, limit)  # limit=0 would make rows[-limit:] return everything
     db = store.open_for_read(check_model=False)  # show never embeds
-    rows = store.session_rows(db, origin=target, session_id=target)
+    uid = sessions.resolve_session(db, target)
+    if uid:
+        rows = store.session_rows(db, session_uid=uid)
+    else:
+        # An origin path, or an id this index cannot pin to one session
+        # (a pseudo id shared by several files): match it as stored.
+        rows = store.session_rows(db, origin=target, session_id=target)
     if not rows:
         return []
 
@@ -43,6 +51,7 @@ def rows_for(target: str, *, around: str | None = None,
             "agent": agent,
             "file": origin,
             "session_id": session_id,
+            "session_uid": session_uid,
             "cwd": cwd,
             "timestamp": timestamp,
             "role": role,
@@ -50,7 +59,7 @@ def rows_for(target: str, *, around: str | None = None,
             "machine": machine or config.machine_id(),
         }
         for (agent, origin, session_id, cwd, timestamp, role, text,
-             machine) in rows
+             machine, session_uid) in rows
     ]
 
 
@@ -97,6 +106,8 @@ def render(target: str, rows: list[dict], *, as_json: bool,
         elsewhere += f"  tenant={tenant}"
     print(f"{first['agent']}  session={first['session_id']}  "
           f"cwd={first['cwd'] or '?'}{elsewhere}")
+    if first.get("session_uid"):
+        print(f"uid: {first['session_uid']}")
     print(f"origin: {first['file']}")
     print()
     for row in rows:

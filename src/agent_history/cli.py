@@ -249,6 +249,14 @@ def _cmd_purge(args) -> int:
         return 1
 
     target = "the ENTIRE index" if args.everything else "matching chunks"
+    if args.session:
+        # --session reaches every session linked to the one named, so say
+        # exactly which ids that covers before anything can be deleted.
+        linked = store.purge_session_ids(db, args.session)
+        if len(linked) > 1:
+            print(f"--session {args.session} covers {len(linked)} linked id(s):")
+            for kind, value in linked:
+                print(f"  {kind:8} {value}")
     if not args.yes:
         print(f"would delete {len(rows)} chunk(s) ({target}).")
         print("this is permanent and cannot be undone. re-run with --yes to do it.")

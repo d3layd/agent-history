@@ -7,7 +7,10 @@ can change without touching this reader.
 
 The machine is the *directory name*, which the hub's authorized_keys pins per
 key; a ``machine`` field inside a batch is ignored, so one machine cannot file
-history under another's name.
+history under another's name. A record's ``session_uid`` and link
+``aliases`` are taken when well-formed (older shippers send neither); the
+uid itself is always derived from the directory's machine, and a claimed one
+that differs is ignored.
 
 The inbox is a queue, so this adapter is the one that retires what it read:
 after the indexer has committed, ``release()`` moves the consumed batches to
@@ -25,11 +28,12 @@ import sys
 from pathlib import Path
 from typing import Iterator
 
-from .. import config
+from .. import config, sessions
 from . import Record
 
 AGENT = "inbox"
 PROCESSED = ".processed"
+SHIPPABLE_KINDS = frozenset(sessions.ALIAS_KINDS) - {"source", "uid"}
 _MACHINE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -138,6 +142,9 @@ def _parse(line: str, machine: str) -> Record | None:
         value = data.get(name)
         return value if isinstance(value, str) else ""
 
+    # Session identity is optional: older shippers send neither field, and
+    # the indexer derives the uid itself.
+    uid = data.get("session_uid")
     return Record(
         agent=field("agent") or "unknown",
         origin=field("origin"),
@@ -147,4 +154,20 @@ def _parse(line: str, machine: str) -> Record | None:
         role=field("role") or "unknown",
         text=text,
         machine=machine,
+        session_uid=uid if sessions.valid_uid(uid) else None,
+        aliases=_aliases(data.get("aliases")),
     )
+
+
+def _aliases(raw: object) -> tuple[tuple[str, str], ...]:
+    """Well-formed link aliases only. ``source`` and ``uid`` are never taken
+    from a shipper: the hub derives the first and decides the second."""
+    if not isinstance(raw, list):
+        return ()
+    out = []
+    for item in raw[:16]:
+        if (isinstance(item, list) and len(item) == 2
+                and item[0] in SHIPPABLE_KINDS
+                and isinstance(item[1], str) and 0 < len(item[1]) <= 200):
+            out.append((item[0], item[1]))
+    return tuple(out)

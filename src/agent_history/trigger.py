@@ -162,7 +162,7 @@ def run(label: str, *, if_changed: bool = False, foreground: bool = False,
         _relaunch_detached(argv)
         return 0
 
-    data = config.ensure_data_home()
+    config.ensure_data_home()
     stamp = config.stamp_path()
     log = config.log_path()
 
