@@ -164,9 +164,9 @@ def test_recall_returns_bounded_hits_without_paths(hub):
     out = data(run_calls(hub["tokens"]["read"], call))
     assert out["count"] >= 1
     hit = out["results"][0]
-    assert set(hit) == {"rank", "timestamp", "agent", "machine", "project",
+    assert set(hit) == {"rank", "timestamp", "agent", "machine", "project", "session_id",
                         "session", "role", "score", "distance", "excerpt"}
-    assert hit["session"] == "sess-dennis" and hit["machine"] == "pc"
+    assert hit["session_id"] == "sess-dennis" and hit["machine"] == "pc"
     assert hit["project"] == "/work/alpha"
     assert all(len(h["excerpt"]) <= mcp_server.EXCERPT_CHARS + 2
                for h in out["results"])
@@ -215,7 +215,7 @@ def test_show_reads_around_a_hit_and_caps_text(hub):
         return await client.call_tool("history_show", {"session": "sess-dennis"})
 
     out = data(run_calls(hub["tokens"]["read"], call))
-    assert out["session"] == "sess-dennis"
+    assert out["session_id"] == "sess-dennis"
     assert [m["role"] for m in out["messages"]] == ["user", "assistant"]
     assert all(len(m["text"]) <= mcp_server.SHOW_TEXT_CHARS + 2
                for m in out["messages"])
@@ -348,7 +348,7 @@ def test_recorded_chats_are_indexed_like_shipped_records(hub, monkeypatch):
     assert found["count"] >= 1
     hit = found["results"][0]
     assert hit["agent"] == "claude-ai-chat" and hit["machine"] == "claude-ai"
-    assert hit["session"] == written["session"]
+    assert hit["session_id"] == written["session"]
     assert GH not in json.dumps(found)
     assert shown["messages"][0]["role"] == "summary"
 
@@ -444,7 +444,7 @@ def test_revoked_token_stops_working_without_a_restart(hub):
 def test_tenants_are_isolated(hub):
     async def call(client):
         return [await client.call_tool("history_recall",
-                                       {"query": "vault rotation plan", "mode": "text"}),
+                                       {"query": "vault rotation", "mode": "text"}),
                 await client.call_tool("history_show", {"session": "sess-dennis"}),
                 await client.call_tool("history_recall",
                                        {"query": "onboarding plan", "mode": "text"})]
@@ -452,13 +452,13 @@ def test_tenants_are_isolated(hub):
     dennis_hit, dennis_show, own = run_calls(hub["tokens"]["eagle"], call)
     assert data(dennis_hit)["count"] == 0
     assert dennis_show.is_error
-    assert data(own)["results"][0]["session"] == "sess-eagle"
+    assert data(own)["results"][0]["session_id"] == "sess-eagle"
 
 
 def test_a_tenant_cannot_be_chosen_by_the_request(hub):
     async def call(client):
         return await client.call_tool("history_recall", {
-            "query": "vault rotation plan", "mode": "text", "tenant": "dennis"})
+            "query": "vault rotation", "mode": "text", "tenant": "dennis"})
 
     result = run_calls(hub["tokens"]["eagle"], call)
     assert result.is_error or data(result)["count"] == 0
