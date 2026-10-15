@@ -1,6 +1,7 @@
 """SQLite + sqlite-vec storage layer."""
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -334,6 +335,11 @@ _STOPWORDS = frozenset(
 )
 
 
+# Mirrors FTS5's unicode61 tokenizer: runs of letters and digits, split on
+# punctuation and underscores, so `foo_bar` is two terms like it is in the index.
+_TOKEN = re.compile(r"[^\W_]+")
+
+
 def _quote(term: str) -> str:
     return '"' + term.replace('"', '""') + '"'
 
@@ -354,12 +360,13 @@ def text_query(
     every word in one chunk, would match nothing at all.
 
     Each term is quoted so FTS5 operator syntax in ordinary prose ("don't",
-    "a-b", stray quotes) cannot break the MATCH expression. Tokens with no
-    letters or digits ("—", "->") are dropped: they index to nothing.
+    "a-b", stray quotes) cannot break the MATCH expression. Terms are split
+    the way the index tokenizes text, so punctuation-only tokens ("—", "->")
+    disappear and `foo_bar` matches chunks holding just `foo` in the fill.
     """
     if not fts_enabled(db):
         return []
-    terms = [t for t in query.split() if any(ch.isalnum() for ch in t)]
+    terms = _TOKEN.findall(query)
     if not terms:
         return []
     fetch = k * 4 if (cwd or agent) else k

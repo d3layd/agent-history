@@ -198,3 +198,9 @@ def test_hybrid_surfaces_a_chunk_ranked_below_2k_in_both_lists(db):
 
     got = store.hybrid_query(db, vector, "zebra quorum", k)
     assert got[0][6] == target
+
+
+def test_text_query_splits_identifiers_like_the_index(db):
+    put(db, "the reconnect handler retries forever")
+    got = store.text_query(db, "reconnect_handler timeout", 5)
+    assert [r[6] for r in got] == ["the reconnect handler retries forever"]
