@@ -68,6 +68,23 @@ they have no corresponding tags.
   `char_start` and `char_end` (offsets into the source record), groundwork
   for scrubbing secrets that cross a chunk boundary. Existing chunks keep
   NULLs.
+- **`agent-history mcp`: the hub over MCP** (#28), for claude.ai through an
+  MCP router. Tools: `history_recall` (search, `k` capped at 20, 700-char
+  excerpts, no origin paths), `history_show` (a session, at most 50 messages
+  of 1500 chars) and `history_record` (append-only chat records: title,
+  summary, decisions, findings, links, chat URL, project). Records are
+  redacted and written as immutable batches into the tenant's inbox under
+  the token's machine name, agent `claude-ai-chat`, so the indexer handles
+  them like shipped Records. Streamable HTTP (stateless, JSON responses) on
+  127.0.0.1:8765, non-loopback refused without `--allow-non-loopback`;
+  `--stdio` for local use. Bearer tokens with `read` or `write` scope and
+  exactly one tenant, stored as SHA-256 hashes in a `0600` file
+  (`agent-history mcp token add|list|revoke`, reloaded on change) or given
+  in the environment; constant-time comparison, 401 before MCP, tool list
+  filtered by scope, per-token rate limits. Session ids use `session_uid`
+  and `store.resolve_session` when the index has them. Optional dependency:
+  `agent-history[mcp]`. Example unit: `deploy/hub/agent-history-mcp.service`;
+  draft claude.ai profile instruction: `docs/claude-ai-profile-instruction.md`.
 
 ### Changed
 - Store rows carry the machine as their eighth column and the canonical

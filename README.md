@@ -183,6 +183,7 @@ $ agent-history serve                       # web viewer at http://127.0.0.1:812
 
 $ agent-history ship                        # send redacted records to the hub
 $ agent-history search "query" --hub        # hub only (see "Hub" below)
+$ agent-history mcp serve                   # MCP tools on 127.0.0.1:8765 (hub; [mcp] extra)
 
 $ agent-history docs add ~/ops-library      # index a documentation tree
 $ agent-history inject off                  # injection is on by default
@@ -504,7 +505,8 @@ command in `authorized_keys`, never from the client's request.
   `scrub`, anything else, or an empty request exits non-zero. Shell
   metacharacters in a query are just query text.
 - **Nothing listens on the network** beyond sshd. Ollama stays on loopback,
-  and the usual rules still apply: `AGENT_HISTORY_HOME` is `0700`/`0600`, the
+  and so does the optional MCP server (below), which a router on the same
+  host reaches. The usual rules still apply: `AGENT_HISTORY_HOME` is `0700`/`0600`, the
   hub's disk should be encrypted (the index has no encryption of its own),
   and `.processed/` holds the redacted batches as received.
 - **Tenant isolation is a software boundary.** All tenants in the examples run
@@ -515,8 +517,114 @@ command in `authorized_keys`, never from the client's request.
 
 Examples, with no secrets and no real hosts, are in [`deploy/`](deploy/):
 templated systemd units for the hub's indexer (`agent-history-hub-index@<tenant>`
-`.service` / `.path` / `.timer`), a user unit and timer for shipping, and
+`.service` / `.path` / `.timer`), the hub's MCP server
+(`agent-history-mcp.service`), a user unit and timer for shipping, and
 `authorized_keys.example`.
+
+### MCP server: claude.ai and other MCP clients
+
+`agent-history mcp` serves the hub's history as MCP tools, so Claude on
+claude.ai (web, desktop, mobile) can search it and add to it through an MCP
+router ([#28](https://github.com/d3layd/agent-history/issues/28)). It needs
+the optional extra: `uv tool install 'agent-history[mcp]'`.
+
+| Tool | Scope | What it does |
+|---|---|---|
+| `history_recall` | read | `query`, `k` (default 8, max 20), optional `agent` / `surface`, `cwd`, `machine`, `mode` (`hybrid`/`text`/`vector`), `sort`. Ranked hits: timestamp, agent, machine, project, session, role, score, a 700-character excerpt. Same `search_rows` as the CLI. |
+| `history_show` | read | `session` (from a hit), optional `around` (timestamp) and `limit` (default 20, max 50). The conversation, oldest first, 1500 characters per message. Same `rows_for` as `show`. |
+| `history_record` | write | `title`, `summary`, `decisions[]`, `findings[]`, `links[]`, `chat_url`, `project`. Saves a chat record and returns its id. |
+
+**Records take the shipped path.** `history_record` builds one Record
+(agent `claude-ai-chat`, role `summary`, timestamp now, `cwd` = project),
+redacts it with the same `redact` pass `ship` uses, and writes it as an
+immutable batch into `<inbox>/<tenant>/<machine>/`, where `<machine>` comes
+from the token (e.g. `claude-ai`). The tenant's indexer picks it up like any
+shipped batch (and redacts again in hub mode), so it is embedded, searchable
+and attributed like everything else. Records from one chat share a session
+(`claude-ai-chat-<chat uuid>` when `chat_url` is a claude.ai chat URL), so
+`history_show` on it returns the chat's whole record trail. It is
+**append-only**: there is no update or delete tool, and the write path only
+ever creates new files (`O_EXCL`, renamed into place). Undoing a record is an
+operator's job (`purge` on the hub).
+
+**Tokens.** Every request carries `Authorization: Bearer <token>`. A token has
+a scope (`read`: recall and show; `write`: record) and names exactly **one
+tenant** index; the tenant never comes from the request. Prefer one scope per
+token. Only SHA-256 hashes are stored, in `$AGENT_HISTORY_HOME/mcp-tokens.json`
+(or `AGENT_HISTORY_MCP_TOKENS`), which must be `0600` and owned by the server's
+user; comparison is constant-time, and adding or revoking a token takes effect
+without a restart. Tokens are never accepted in argv and never logged.
+
+```console
+$ agent-history mcp token add router-read  --scope read  --tenant dennis
+ahmcp_...                                   # printed once; give it to the router
+$ agent-history mcp token add router-write --scope write --tenant dennis --machine claude-ai
+$ agent-history mcp token list              # names, scopes, tenants; no secrets
+$ agent-history mcp token revoke router-read
+$ agent-history mcp serve                   # http://127.0.0.1:8765/mcp
+$ agent-history mcp serve --stdio           # local testing; token from AGENT_HISTORY_MCP_TOKEN
+```
+
+For a single-tenant setup the tokens can come from the environment instead:
+`AGENT_HISTORY_MCP_READ_TOKEN` / `AGENT_HISTORY_MCP_WRITE_TOKEN` (32+
+characters), with `AGENT_HISTORY_MCP_TENANT` and `AGENT_HISTORY_MCP_MACHINE`.
+
+**Transport and exposure.** Streamable HTTP, stateless with JSON responses
+(one request, one answer, nothing to keep alive), on **127.0.0.1:8765** by
+default. A non-loopback `--host` is refused unless you pass
+`--allow-non-loopback`, which belongs only behind an authenticating
+TLS-terminating proxy. Requests without a valid token get `401` before they
+reach MCP; `GET /healthz` answers `ok` and nothing else. The tool list a
+client sees is filtered to its token's scope, and every call is checked
+again. Calls are rate-limited per token (60 reads and 20 writes a minute).
+Results never include a hit's origin (the file path on the machine that
+shipped it); `project` is the session's working directory, as `search` shows.
+
+**Mounting it in [mcp-router](https://github.com/d3layd/mcp-router).** The
+router connects to each upstream once, with fixed headers, and decides per
+client what it may call. Run the server on the router's host (loopback), as
+`deploy/hub/agent-history-mcp.service`, and mount it **twice**, once per
+token, so the router's grants are per server and no single upstream entry can
+both read and write:
+
+```yaml
+# router.yaml
+servers:
+  - id: history                     # tools: history__history_recall, history__history_show
+    transport: http
+    url: http://127.0.0.1:8765/mcp
+    headers:
+      Authorization: Bearer ${AGENT_HISTORY_READ_TOKEN}
+  - id: history-rec                 # tool: history-rec__history_record
+    transport: http
+    url: http://127.0.0.1:8765/mcp
+    headers:
+      Authorization: Bearer ${AGENT_HISTORY_WRITE_TOKEN}
+    operations:
+      history_record: create        # "record" is not a verb the router knows
+
+roles:
+  history-user:
+    - server: history
+      allow: [read]
+    - server: history-rec
+      allow: [create]
+
+clients:
+  - id: claude-ai
+    roles: [operator, history-user]   # add to the client's existing roles
+```
+
+Put the two tokens in the router's environment file (`/etc/mcp-router/env`,
+`0600`), never in `router.yaml`, and restart the router (a `servers` change
+needs one). `history_recall` and `history_show` are classified `read` by
+their `readOnlyHint`. A client that should only search gets just the
+`history` rule. Records arrive under the write token's `machine`, which says
+which client wrote them but not which router client called; if that matters,
+give each such client its own write token and upstream entry.
+
+A profile instruction that makes claude.ai use the tools at the right moments
+is drafted in [`docs/claude-ai-profile-instruction.md`](docs/claude-ai-profile-instruction.md).
 
 ## Session identity
 
@@ -769,6 +877,10 @@ is no daemon, no server, and no separate process to keep alive.
 | `AGENT_HISTORY_HUB` | – | `1` makes this install a hub: inbox only, redaction forced |
 | `AGENT_HISTORY_INBOX` | – | Directory of `<machine>/*.jsonl` batches (hub) |
 | `AGENT_HISTORY_TENANTS` | `~/tenants` | Root of per-tenant data homes (multi-tenant hub, `serve-ssh --tenants`) |
+| `AGENT_HISTORY_MCP_TOKENS` | `$AGENT_HISTORY_HOME/mcp-tokens.json` | Hashed bearer tokens for `agent-history mcp` (must be `0600`) |
+| `AGENT_HISTORY_MCP_READ_TOKEN` / `_WRITE_TOKEN` | – | Single-tenant alternative to the token file (32+ characters) |
+| `AGENT_HISTORY_MCP_TENANT` / `_MACHINE` | – | Tenant and record provenance for the environment tokens |
+| `AGENT_HISTORY_MCP_TOKEN` | – | The caller's token for `agent-history mcp --stdio` |
 
 Switching `AGENT_HISTORY_MODEL` calls for **`agent-history reembed`** —
 vectors from different models are not comparable, and the tool detects the
@@ -900,19 +1012,19 @@ The original roadmap — adapters for every agent found on this machine — is
 complete. What remains is driven by use, and tracked in the
 [issues](https://github.com/d3layd/agent-history/issues):
 
-- [ ] An optional **`history_recall` MCP tool** — recall as a tool the agent
-  invokes, so its call renders with Claude Code's native click-to-expand UI
-  (full query and results, inspectable). A complement to injection, not a
-  replacement: injection stays the ambient, zero-turn default; the tool is
-  the deliberate, inspectable path.
+- [x] A **`history_recall` MCP tool**, with `history_show` and an
+  append-only `history_record`, served by `agent-history mcp` behind an MCP
+  router ([MCP server](#mcp-server-claudeai-and-other-mcp-clients), #28). A
+  complement to injection, not a replacement: injection stays the ambient,
+  zero-turn default; the tool is the deliberate, inspectable path.
 - [ ] **Self-calibrating injection cutoff** so a model swap can't silently
   mis-tune it (#13).
 - [ ] **CMMC/CUI hardening** — a strict-mode secret scrub and the rest of the
   gap list toward a regulated deployment (#16).
 - [x] A **hub** deployment: many machines ship redacted records to one
   index, per tenant, that is searched over ssh ([Hub](#hub-central-history),
-  #25). Still open from #25: an HTTP/MCP API behind an authenticating proxy,
-  and remote-aware injection.
+  #25), and served over MCP to claude.ai through a router. Still open from
+  #25: remote-aware injection.
 - [ ] **Multi-machine** merge / snapshot / restore over encrypted object
   storage (#9).
 - [ ] An approximate vector index if a corpus outgrows exhaustive kNN
