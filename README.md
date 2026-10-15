@@ -37,10 +37,12 @@ that knows where that agent keeps its transcripts and how to read them:
 | **Hermes** | `~/.hermes*/state.db`, one per profile | SQLite |
 | **OpenClaw** | `~/.openclaw/agents/*/sessions/` + workspace markdown | JSONL |
 | **docs** (opt-in) | any documentation trees you name — runbooks, ops notes, session summaries | `*.md` / `*.txt` |
+| **claude.ai** (import) | a claude.ai data export you download — chats, attachments, projects, memories | JSON |
 
-Everything found is detected automatically (docs excepted — see
-[below](#indexing-documentation-trees)), merged into one index, searchable
-together or filtered with `--agent`.
+Everything found is detected automatically (docs and imports excepted — see
+[docs](#indexing-documentation-trees) and
+[backfilling claude.ai](#backfilling-claudeai-chats-from-a-data-export)),
+merged into one index, searchable together or filtered with `--agent`.
 
 **Hybrid search.** Vector similarity finds meaning; BM25 full-text finds the
 exact identifiers embeddings are bad at (`os error 11001`, a function name);
@@ -181,6 +183,7 @@ $ agent-history show s1 --around 2026-06-14T22:03  # centred on a timestamp
 $ agent-history serve                       # web viewer at http://127.0.0.1:8127
 
 $ agent-history docs add ~/ops-library      # index a documentation tree
+$ agent-history import claude-ai <dir>      # backfill a claude.ai data export
 $ agent-history inject off                  # injection is on by default
 $ agent-history inject toggle               # or /history:inject in Claude Code
 $ agent-history strict on                   # compliance profile (see below)
@@ -291,6 +294,60 @@ Together with the Hermes and OpenClaw adapters, this lets one agent-history
 install replace a hand-rolled transcript-plus-docs indexer — the
 Ollama-embeddings-over-SQLite pattern many ops setups grow — with hybrid
 search over all of it.
+
+## Backfilling claude.ai chats from a data export
+
+claude.ai chats (web, desktop, mobile) leave nothing on disk to index. Their
+one full-fidelity copy is the data export: Settings → Privacy → **Export
+data**, then unzip what arrives by email. Import it explicitly:
+
+```console
+$ agent-history import claude-ai ~/Downloads/claude-export --dry-run   # count only
+$ agent-history import claude-ai ~/Downloads/claude-export
+$ agent-history search "shed footings" --agent claude-ai
+```
+
+`--dry-run` parses and counts without touching the index or Ollama. The real
+import goes through the normal indexing path — chunked, content-hashed,
+embedded — under the same lock as `index`.
+
+**Re-importing a newer export adds only what is new.** Every chunk is keyed
+by the hash of its text, so messages already indexed are skipped wherever
+they came from. A message edited in place adds one chunk for its new text;
+a regenerated reply identical to one already stored adds nothing. The
+conversation's name and claude.ai's summary are a separate `title` record,
+so renaming a chat never re-imports its messages.
+
+What gets indexed, all under agent `claude-ai`:
+
+| export part | record role | location (`cwd`) |
+|---|---|---|
+| chat message text (text and voice-note blocks) | `user` / `assistant` | `claude.ai` |
+| conversation name + summary | `title` | `claude.ai` |
+| text extracted from pasted/uploaded files (first 100k chars each) | `attachment` | as its chat |
+| project knowledge files | `doc` | `claude.ai/project/<name>` |
+| project description + custom instructions | `instructions` | `claude.ai/project/<name>` |
+| account memory, project memories, memory files | `memory` | `claude.ai` or its project |
+| Claude Design chats | `user` / `assistant` | `claude.ai/design/<project>` |
+
+`session_id` is the conversation's uuid, so `agent-history show <uuid>`
+prints the whole chat. Skipped on purpose: thinking blocks and tool calls and
+results (the same line the Claude Code adapter draws), uploaded images,
+`frames` (rendered artifact versions and their assets), `artifact_data`,
+`feedback`, login metadata and Claude Code cloud routine metadata. The export
+doesn't currently say which project a chat belongs to; if it ever does
+(`project_uuid`), chats are filed under the project.
+
+Imported chunks count as history the index alone holds: no adapter re-reads
+the export, so `reindex` refuses to wipe them without `--force`, exactly as
+for deleted transcripts. `agent-history purge --agent claude-ai --yes`
+removes the whole import. Because their `cwd` is never a real directory,
+claude.ai chunks only reach context injection through the strict
+cross-project cutoff, and never under `strict`.
+
+The 180 MB `conversations.json` of a real three-year export parses in about
+5 seconds with ~100 MB peak memory: it is streamed one conversation at a
+time rather than loaded whole (`json.load` alone peaks above 500 MB).
 
 ## Your index outlives the transcripts
 
