@@ -9,6 +9,20 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [Unreleased]
+
+### Fixed
+- **Hybrid search's full-text half works on natural-language queries.** Terms
+  were joined with FTS5's implicit AND, so a prose query matched only chunks
+  containing every word — usually none — and hybrid search quietly fell back
+  to vector-only. Full-text search now takes chunks with every term first,
+  then fills up from chunks with any term (BM25-ranked, common stopwords
+  skipped, no duplicates). Punctuation-only tokens such as "—" are dropped.
+  Exact-identifier queries ("os error 11001") still put exact matches first.
+- **Hybrid search fuses a deeper candidate pool.** Each half now contributes
+  `max(k × 10, 50)` candidates instead of `k × 2`, so a chunk that is only
+  middling in each list can still outrank one that tops a single list.
+
 ## [0.16.0] — 2026-10-11
 
 ### Added
