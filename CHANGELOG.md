@@ -68,6 +68,16 @@ they have no corresponding tags.
   `char_start` and `char_end` (offsets into the source record), groundwork
   for scrubbing secrets that cross a chunk boundary. Existing chunks keep
   NULLs.
+- **Chunk stitching for `scrub` and `ship --backfill-from-index`** (#35).
+  Stored chunks are rejoined into whole records (same origin, session,
+  timestamp, role and machine; consecutive ids and an exact 200-char overlap,
+  or the provenance columns where present), redacted whole, then cut back into
+  their windows. Secrets longer than the overlap that straddle a chunk
+  boundary (JWTs, PEM keys, long bearer tokens) are no longer missed.
+  Backfill now ships the stitched record, so the hub dedups it against the
+  same message shipped from an on-disk transcript. Chunks that cannot be
+  stitched fall back to per-chunk redaction plus a safety net: a 40+ char
+  base64 run touching a chunk edge becomes `[REDACTED:fragment]`.
 - **`agent-history mcp`: the hub over MCP** (#28), for claude.ai through an
   MCP router. Tools: `history_recall` (search, `k` capped at 20, 700-char
   excerpts, no origin paths), `history_show` (a session, at most 50 messages
