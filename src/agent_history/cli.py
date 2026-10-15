@@ -11,7 +11,7 @@ from . import (__version__, adapters, config, embed, index, inject, scrub,
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub", "ship", "serve-ssh", "mcp"}
+            "purge", "strict", "scrub", "ship", "serve-ssh", "mcp", "import"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -47,6 +47,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "scrub", help="redact secrets already stored in the index")
     scr.add_argument("--yes", action="store_true",
                      help="rewrite the affected chunks; without it, only previews")
+
+    imp = sub.add_parser(
+        "import",
+        help="backfill from a data export (claude.ai), deduplicated on re-import")
+    imp.add_argument("kind", choices=["claude-ai"],
+                     help="export format")
+    imp.add_argument("path", help="the unpacked export directory")
+    imp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="parse and count only — no index, no Ollama")
 
     strict = sub.add_parser(
         "strict", help="compliance profile: injection off + scoped to project")
@@ -335,6 +344,18 @@ def _cmd_purge(args) -> int:
     return 0
 
 
+def _cmd_import(kind: str, path: str, *, dry_run: bool) -> int:
+    from pathlib import Path
+
+    from .adapters.claude_ai import ClaudeAiExport
+
+    root = Path(path).expanduser()
+    if not root.is_dir():
+        print(f"error: not a directory: {root}", file=sys.stderr)
+        return 1
+    return index.run_import(ClaudeAiExport(root), dry_run=dry_run)
+
+
 def _cmd_strict(action: str) -> int:
     if action == "status":
         on = config.strict_enabled()
@@ -524,6 +545,9 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             return _cmd_strict(args.action)
         if args.command == "scrub":
             return scrub.run(yes=args.yes)
+
+        if args.command == "import":
+            return _cmd_import(args.kind, args.path, dry_run=args.dry_run)
     except (store.StoreError, embed.EmbedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

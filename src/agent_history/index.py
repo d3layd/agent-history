@@ -43,8 +43,8 @@ def _guard_reindex(force: bool) -> int | None:
     if chunks == 0 or force:
         return None
     print(
-        f"reindex refused: {chunks} chunk(s) from {origins} deleted "
-        "source(s) exist only in this index and would be lost.\n"
+        f"reindex refused: {chunks} chunk(s) from {origins} deleted or "
+        "imported source(s) exist only in this index and would be lost.\n"
         "  changing embedding model?  agent-history reembed   (keeps everything)\n"
         "  really discard them?       agent-history reindex --force",
         file=sys.stderr,
@@ -250,6 +250,13 @@ def run(reindex: bool = False, force: bool = False) -> int:
         _release_consumed(active)
         return 0
 
+    return _embed_pending(db, pending, uids, active)
+
+
+def _embed_pending(db, pending: list[tuple], uids: "_Uids",
+                   active: list = ()) -> int:
+    """Embed and store `pending` chunks, committing as it goes. Queue-like
+    sources in `active` are released only when nothing was skipped."""
     print(f"Embedding {len(pending)} new chunk(s)...")
     started = time.time()
     failures = 0
@@ -300,6 +307,85 @@ def run(reindex: bool = False, force: bool = False) -> int:
     else:
         _release_consumed(active)
     return 0
+
+
+# -------------------------------------------------------------------- import
+
+def run_import(source, *, dry_run: bool = False) -> int:
+    """Index one on-demand source (an export directory) through the normal path.
+
+    Imports are not registered adapters — a data export is a snapshot, not
+    something to re-parse on every hook — but they are chunked, hashed,
+    deduplicated and embedded exactly like everything else, so re-importing
+    a newer export adds only what is new.
+    """
+    if not source.available():
+        print(f"nothing importable found under {source.root}", file=sys.stderr)
+        return 1
+    if dry_run:
+        return _import_dry_run(source)
+
+    from . import trigger
+
+    # Hold the indexing lock: a hook-triggered `index` running concurrently
+    # would race this run on the same content hashes.
+    with trigger._exclusive(config.lock_path()) as acquired:
+        if not acquired:
+            print("another indexing run holds the lock; retry shortly",
+                  file=sys.stderr)
+            return 1
+        db, _dimension = store.open_for_write()
+        seen = store.existing_hashes(db)
+        print(f"Already indexed: {len(seen)} chunk(s)")
+        counts: Counter[str] = Counter()
+        links: dict = {}
+        pending, _produced, _mutable = _pending(seen, counts, [source], links)
+        _print_import_stats(source)
+        if counts:
+            print("redacted in new chunks: " + ", ".join(
+                f"{n} {cls}" for cls, n in counts.most_common()))
+        uids = _Uids(db)
+        if links:
+            _link_sessions(db, links, uids)
+        if not pending:
+            print("Up to date.")
+            return 0
+        return _embed_pending(db, pending, uids)
+
+
+def _import_dry_run(source) -> int:
+    """Parse and count, touching neither the index nor Ollama."""
+    started = time.time()
+    roles: Counter[str] = Counter()
+    chunks = 0
+    hashes: set[str] = set()
+    first = last = ""
+    for record in source.records():
+        if textproc.is_injection(record.text):
+            continue
+        roles[record.role] += 1
+        if record.timestamp:
+            first = min(first or record.timestamp, record.timestamp)
+            last = max(last, record.timestamp)
+        for piece in chunk_text(record.text):
+            chunks += 1
+            hashes.add(hashlib.sha256(piece.encode("utf-8")).hexdigest())
+    elapsed = time.time() - started
+    print(f"dry run: {source.root} (nothing written)")
+    _print_import_stats(source)
+    print(f"  records:                {sum(roles.values())}")
+    for role, count in sorted(roles.items()):
+        print(f"    {role}: {count}")
+    print(f"  date range:             {first[:10] or '?'} .. {last[:10] or '?'}")
+    print(f"  chunks:                 {chunks} ({len(hashes)} unique)")
+    print(f"  parse time:             {elapsed:.1f}s")
+    return 0
+
+
+def _print_import_stats(source) -> None:
+    stats = getattr(source, "stats", None) or {}
+    for key in sorted(stats):
+        print(f"  {key + ':':<24}{stats[key]}")
 
 
 # ------------------------------------------------------------------- reembed

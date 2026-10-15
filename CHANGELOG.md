@@ -86,7 +86,20 @@ they have no corresponding tags.
   `agent-history[mcp]`. Example unit: `deploy/hub/agent-history-mcp.service`;
   draft claude.ai profile instruction: `docs/claude-ai-profile-instruction.md`.
 
+- **`agent-history import claude-ai <export-dir>`** backfills claude.ai chats
+  from the official data export (#28). Chat text, conversation titles and
+  summaries, extracted attachment text (capped at 100k characters each),
+  project docs and instructions, memories and Claude Design chats are indexed
+  under agent `claude-ai`, with the conversation uuid as session id and
+  `claude.ai` / `claude.ai/project/<name>` as the location. Re-importing a
+  newer export adds only new text via the existing content-hash dedup.
+  `--dry-run` parses and counts without the index or Ollama. The
+  conversations file is streamed, so a 180 MB export parses in ~5 s at
+  ~100 MB peak memory.
+
 ### Changed
+- `reindex` now also refuses (without `--force`) to wipe imported claude.ai
+  chunks: no adapter re-reads an export, so the index is their only copy.
 - Store rows carry the machine as their eighth column and the canonical
   session uid as their ninth, so the distance now follows at index 9
   (internal; the JSON output gains `machine` and `session_uid`).
