@@ -290,7 +290,8 @@ def test_record_is_redacted_and_lands_in_the_inbox(hub):
     assert out["redacted"] == {"github_token": 1}
 
     (path,) = batches(hub)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name != "nt":  # Windows has no POSIX mode bits
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     raw = path.read_text()
     assert GH not in raw and "[REDACTED:github_token]" in raw
     line = json.loads(raw)
@@ -492,7 +493,8 @@ def test_rate_limiter_window_slides():
 def test_token_file_stores_only_hashes_and_is_private(hub):
     path = hub["tmp"] / "tokens.json"
     raw = path.read_text()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name != "nt":  # Windows has no POSIX mode bits
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert all(token not in raw for token in hub["tokens"].values())
     assert mcp_auth.list_tokens() and all("sha256" not in e
                                           for e in mcp_auth.list_tokens())
