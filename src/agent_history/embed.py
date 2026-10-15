@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from . import config
+from . import config, redact
 
 
 class EmbedError(RuntimeError):
@@ -53,6 +53,11 @@ def check_endpoint() -> None:
 def embed(text: str, timeout: int = 120) -> list[float]:
     """Embed one string. Raises EmbedError with an actionable message."""
     check_endpoint()
+    if not _is_loopback(urlparse(config.ollama_url()).hostname or ""):
+        # Off-box embedding is an egress path: secrets never leave the
+        # machine, whatever the local redaction setting. Only the embedding
+        # input changes; the stored chunk is untouched.
+        text, _ = redact.redact(text)
     url = f"{config.ollama_url()}/api/embeddings"
     try:
         response = requests.post(
