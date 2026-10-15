@@ -164,23 +164,27 @@ def open_for_maintenance() -> sqlite3.Connection:
 
 
 def orphaned_counts(db: sqlite3.Connection) -> tuple[int, int]:
-    """(chunks, origins) whose source no longer exists on disk.
+    """(chunks, origins) that a rebuild from disk could not recreate.
 
     These chunks are the ones `reindex` would destroy irrecoverably — the
-    index is their only surviving copy. `db:<path>#<table>` origins are
-    checked against the database file path inside them.
+    index is their only surviving copy: their source no longer exists on
+    disk, or they came from an on-demand import (`agent-history import`)
+    that no adapter re-reads. `db:<path>#<table>` origins are checked
+    against the database file path inside them.
     """
     from pathlib import Path
 
+    from .adapters import IMPORT_ONLY_AGENTS
+
     rows = db.execute(
-        "SELECT origin, count(*) FROM chunks GROUP BY origin"
+        "SELECT agent, origin, count(*) FROM chunks GROUP BY agent, origin"
     ).fetchall()
     chunks = origins = 0
-    for origin, count in rows:
+    for agent, origin, count in rows:
         path = origin
         if origin.startswith("db:"):
             path = origin[3:].split("#", 1)[0]
-        if not Path(path).exists():
+        if agent in IMPORT_ONLY_AGENTS or not Path(path).exists():
             origins += 1
             chunks += count
     return chunks, origins

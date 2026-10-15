@@ -41,6 +41,13 @@ class Adapter(Protocol):
         """Every indexable message this agent has stored."""
 
 
+# Agents whose records arrive only through `agent-history import` (a data
+# export, read once on demand) rather than a registered adapter. A rebuild
+# from disk cannot recreate them, so `reindex` treats them like deleted
+# sources and refuses to wipe them without --force.
+IMPORT_ONLY_AGENTS = frozenset({"claude-ai"})
+
+
 def all_adapters() -> list[Adapter]:
     from .claude_code import ClaudeCodeAdapter
     from .codex import CodexAdapter

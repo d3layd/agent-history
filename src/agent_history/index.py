@@ -10,6 +10,7 @@ import hashlib
 import sqlite3
 import sys
 import time
+from collections import Counter
 
 from . import adapters, config, embed, store, textproc
 from .textproc import chunk_text
@@ -42,8 +43,8 @@ def _guard_reindex(force: bool) -> int | None:
     if chunks == 0 or force:
         return None
     print(
-        f"reindex refused: {chunks} chunk(s) from {origins} deleted "
-        "source(s) exist only in this index and would be lost.\n"
+        f"reindex refused: {chunks} chunk(s) from {origins} deleted or "
+        "imported source(s) exist only in this index and would be lost.\n"
         "  changing embedding model?  agent-history reembed   (keeps everything)\n"
         "  really discard them?       agent-history reindex --force",
         file=sys.stderr,
@@ -53,6 +54,8 @@ def _guard_reindex(force: bool) -> int | None:
 
 def _pending(
     seen: set[str],
+    *,
+    sources: list | None = None,
 ) -> tuple[list[tuple[adapters.Record, str, str]], set[str], list[tuple[str, str]]]:
     """Collect what needs indexing, and what mutable sources currently hold.
 
@@ -64,7 +67,9 @@ def _pending(
     out: list[tuple[adapters.Record, str, str]] = []
     produced: set[str] = set()
     mutable_targets: set[tuple[str, str]] = set()
-    for adapter in adapters.available_adapters():
+    if sources is None:
+        sources = adapters.available_adapters()
+    for adapter in sources:
         count = 0
         for record in adapter.records():
             # Never index this tool's own injected recall — re-indexing it
@@ -126,6 +131,11 @@ def run(reindex: bool = False, force: bool = False) -> int:
         print("Up to date.")
         return 0
 
+    return _embed_pending(db, pending)
+
+
+def _embed_pending(db, pending: list[tuple[adapters.Record, str, str]]) -> int:
+    """Embed and store `pending` chunks, committing as it goes."""
     print(f"Embedding {len(pending)} new chunk(s)...")
     started = time.time()
     failures = 0
@@ -168,6 +178,77 @@ def run(reindex: bool = False, force: bool = False) -> int:
     if failures:
         print(f"({failures} chunk(s) skipped due to embed errors)", file=sys.stderr)
     return 0
+
+
+# -------------------------------------------------------------------- import
+
+def run_import(source, *, dry_run: bool = False) -> int:
+    """Index one on-demand source (an export directory) through the normal path.
+
+    Imports are not registered adapters — a data export is a snapshot, not
+    something to re-parse on every hook — but they are chunked, hashed,
+    deduplicated and embedded exactly like everything else, so re-importing
+    a newer export adds only what is new.
+    """
+    if not source.available():
+        print(f"nothing importable found under {source.root}", file=sys.stderr)
+        return 1
+    if dry_run:
+        return _import_dry_run(source)
+
+    from . import trigger
+
+    # Hold the indexing lock: a hook-triggered `index` running concurrently
+    # would race this run on the same content hashes.
+    with trigger._exclusive(config.lock_path()) as acquired:
+        if not acquired:
+            print("another indexing run holds the lock; retry shortly",
+                  file=sys.stderr)
+            return 1
+        db, _dimension = store.open_for_write()
+        seen = store.existing_hashes(db)
+        print(f"Already indexed: {len(seen)} chunk(s)")
+        pending, _produced, _mutable = _pending(seen, sources=[source])
+        _print_import_stats(source)
+        if not pending:
+            print("Up to date.")
+            return 0
+        return _embed_pending(db, pending)
+
+
+def _import_dry_run(source) -> int:
+    """Parse and count, touching neither the index nor Ollama."""
+    started = time.time()
+    roles: Counter[str] = Counter()
+    chunks = 0
+    hashes: set[str] = set()
+    first = last = ""
+    for record in source.records():
+        if textproc.is_injection(record.text):
+            continue
+        roles[record.role] += 1
+        if record.timestamp:
+            first = min(first or record.timestamp, record.timestamp)
+            last = max(last, record.timestamp)
+        for piece in chunk_text(record.text):
+            chunks += 1
+            hashes.add(hashlib.sha256(piece.encode("utf-8")).hexdigest())
+    elapsed = time.time() - started
+    print(f"dry run: {source.root} (nothing written)")
+    _print_import_stats(source)
+    print(f"  records:                {sum(roles.values())}")
+    for role, count in sorted(roles.items()):
+        print(f"    {role}: {count}")
+    print(f"  date range:             {first[:10] or '?'} .. {last[:10] or '?'}")
+    print(f"  chunks:                 {chunks} ({len(hashes)} unique)")
+    print(f"  parse time:             {elapsed:.1f}s")
+    return 0
+
+
+def _print_import_stats(source) -> None:
+    stats = getattr(source, "stats", None) or {}
+    for key in sorted(stats):
+        print(f"  {key + ':':<24}{stats[key]}")
 
 
 # ------------------------------------------------------------------- reembed
