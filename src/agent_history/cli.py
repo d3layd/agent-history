@@ -11,7 +11,7 @@ from . import (__version__, adapters, config, embed, index, inject, scrub,
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub", "ship", "serve-ssh"}
+            "purge", "strict", "scrub", "ship", "serve-ssh", "mcp"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -131,7 +131,76 @@ def _build_parser() -> argparse.ArgumentParser:
     doc.add_argument("action", nargs="?", default="list",
                      choices=["add", "remove", "list"])
     doc.add_argument("path", nargs="?", help="directory, for add/remove")
+
+    mcp = sub.add_parser(
+        "mcp", help="MCP server for history_recall / history_show / "
+                    "history_record (needs the [mcp] extra)")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command")
+    mserve = mcp_sub.add_parser(
+        "serve", help="run the server (default: Streamable HTTP on 127.0.0.1)")
+    # `mcp --port 1` and `mcp serve --port 1` both work; the subcommand's
+    # copies default to SUPPRESS so they never overwrite the parent's values.
+    for target, fallback in ((mcp, None), (mserve, argparse.SUPPRESS)):
+        def default(value, fallback=fallback):
+            return value if fallback is None else fallback
+        target.add_argument("--stdio", action="store_true", default=default(False),
+                            help="speak stdio instead of HTTP; the token comes "
+                                 "from AGENT_HISTORY_MCP_TOKEN")
+        target.add_argument("--host", default=default("127.0.0.1"),
+                            help="bind address (default 127.0.0.1)")
+        target.add_argument("--port", type=_port, default=default(8765),
+                            help="port (default 8765)")
+        target.add_argument("--allow-non-loopback", action="store_true",
+                            default=default(False),
+                            help="permit a non-loopback --host (only behind an "
+                                 "authenticating TLS proxy)")
+    mtok = mcp_sub.add_parser("token", help="manage bearer tokens (hashes only "
+                                            "are stored, in a 0600 file)")
+    mtok_sub = mtok.add_subparsers(dest="token_command", required=True)
+    tadd = mtok_sub.add_parser("add", help="create a token and print it once")
+    tadd.add_argument("name")
+    tadd.add_argument("--scope", required=True, action="append",
+                      choices=["read", "write"],
+                      help="read (recall/show) or write (record); repeatable, "
+                           "but prefer one scope per token")
+    tadd.add_argument("--tenant", help="the one tenant index this token opens "
+                                       "(omit on a hub without tenants)")
+    tadd.add_argument("--machine", help="provenance for records written with "
+                                        "this token (default mcp-<name>)")
+    mtok_sub.add_parser("list", help="names, scopes and tenants (no secrets)")
+    trev = mtok_sub.add_parser("revoke", help="delete a token")
+    trev.add_argument("name")
     return parser
+
+
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    from . import mcp_auth, mcp_server
+
+    if args.mcp_command in (None, "serve"):
+        return mcp_server.serve(
+            transport="stdio" if args.stdio else "http", host=args.host,
+            port=args.port, allow_non_loopback=args.allow_non_loopback)
+    try:
+        if args.token_command == "add":
+            token = mcp_auth.add_token(args.name, args.scope, args.tenant,
+                                       args.machine)
+            print(token)
+            print(f"stored the hash of token {args.name!r} in "
+                  f"{mcp_auth.tokens_path()}; the token itself is shown only "
+                  "this once", file=sys.stderr)
+            return 0
+        if args.token_command == "list":
+            for entry in mcp_auth.list_tokens():
+                print(json.dumps(entry))
+            return 0
+        if mcp_auth.revoke_token(args.name):
+            print(f"revoked {args.name!r}")
+            return 0
+        print(f"no token named {args.name!r}", file=sys.stderr)
+        return 1
+    except mcp_auth.TokenConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _add_where(parser: argparse.ArgumentParser) -> None:
@@ -437,6 +506,8 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             return serve_ssh.run(args.tenants)
         if args.command == "serve":
             return viewer.run(port=args.port)
+        if args.command == "mcp":
+            return _cmd_mcp(args)
         if args.command == "inject":
             if args.action == "run":
                 return inject.run_hook()
