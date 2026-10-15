@@ -12,7 +12,7 @@ import stat
 
 import pytest
 
-from agent_history import config, index, redact, ship, store, trigger
+from agent_history import config, index, redact, sessions, ship, store, trigger
 from conftest import msg
 
 GH = "".join(["gh", "p_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"])
@@ -51,6 +51,7 @@ def test_ship_sends_records_with_the_documented_fields(transcripts, hub):
         "origin": rec["origin"], "session_id": "sess-1", "cwd": "/work",
         "timestamp": "2026-01-01T00:00:00Z", "role": "user",
         "text": "a message worth shipping to the hub",
+        "session_uid": sessions.derive_uid("claude-code", "testbox", "sess-1"),
     }
 
 

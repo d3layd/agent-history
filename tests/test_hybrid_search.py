@@ -60,7 +60,7 @@ def test_hybrid_ranks_double_hits_first(db):
     got = store.hybrid_query(
         db, vector, "authentication middleware session refresh", 5)
     assert got[0][6].startswith("authentication middleware")
-    assert got[0][9] > got[-1][9]  # RRF score orders the list
+    assert got[0][10] > got[-1][10]  # RRF score orders the list
 
 
 def test_hybrid_respects_agent_and_cwd_filters(db):

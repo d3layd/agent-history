@@ -518,6 +518,41 @@ templated systemd units for the hub's indexer (`agent-history-hub-index@<tenant>
 `.service` / `.path` / `.timer`), a user unit and timer for shipping, and
 `authorized_keys.example`.
 
+## Session identity
+
+A source's session id is not a good identity. One conversation can have
+several (a local Claude Code uuid, a remote-control `session_…` / `cse_…`
+pair, a teleported copy, an export id), and synthetic ids collide: every
+project's memory file used to be `memory:MEMORY`, and two machines on a hub
+can report the same id.
+
+So every session gets a **uid** of the tool's own: a UUIDv5 over
+`agent`, `machine` and the source id (plus the file path for memory and doc
+files). It is a pure function of the record, so a rebuild, another machine and
+the hub all arrive at the same uid, and once a chunk carries one it never
+changes. The raw id stays as metadata and as an alias.
+
+Other ids are linked to the uid only on hard evidence. Today that is Claude
+Code's remote-control bridge: the `bridge-session` line in a transcript, or
+`bridgeSessionId` in `~/.claude/sessions/*.json`, links `cse_<x>` and
+`session_<x>`. When the evidence shows two sessions are one conversation, the
+earliest stays canonical and the other's ids become aliases of it.
+
+You never have to type a uid. `show`, `purge --session` and anything else
+that takes a session accept the uid, the raw id (what `claude --resume`
+takes) or any alias:
+
+```bash
+agent-history show 0b6a5a8e-1111-4222-8333-944455556666   # raw Claude Code id
+agent-history show session_01AbCdEfGhJkLmNpQrStUvWx       # its remote-control id
+```
+
+`search --json` and `show --json` report `session_uid` next to `session_id`.
+Records shipped to a hub carry the uid and their aliases; a record from an
+older shipper without them gets a uid derived on the hub. An existing index
+is upgraded in place on first open (columns and tables added, uids backfilled
+in one pass, nothing re-embedded or deleted).
+
 ## How indexing works
 
 ```
@@ -647,10 +682,15 @@ creation, the loopback policy, WSL profile disambiguation.
 
 ```sql
 chunks(id, agent, origin, session_id, cwd, timestamp, role, text,
-       content_hash UNIQUE)
+       content_hash UNIQUE, machine, session_uid,
+       record_id, chunk_ordinal, char_start, char_end)  -- provenance
 vec_chunks USING vec0(embedding float[768])   -- rowid ⟷ chunks.id
 fts_chunks USING fts5(text, content='chunks') -- BM25, external content
 meta(key, value)                              -- model, dimension
+sessions(uid PRIMARY KEY, agent, machine, source_session_id, origin,
+         first_seen, last_seen, meta)         -- one row per conversation
+session_aliases(kind, value, session_uid,
+                PRIMARY KEY(kind, value))     -- every other id it has
 ```
 
 Three decisions carry most of the weight:

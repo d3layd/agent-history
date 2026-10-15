@@ -19,6 +19,12 @@ nothing twice:
 
 The hub dedups by content, so even a crash between the steps costs only a
 repeated upload, never a lost or doubled record.
+
+Each record also carries its session's uid and any link aliases
+(``session_uid``, ``aliases``), so the hub files it under the same
+conversation this machine does instead of re-deriving. Both fields are
+optional on the wire: a hub accepts records from older shippers without them,
+and an older hub ignores them.
 """
 from __future__ import annotations
 
@@ -35,7 +41,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
-from . import adapters, config, redact, store, textproc
+from . import adapters, config, redact, sessions, store, textproc
 
 BATCH_LINES = 2000
 FORMAT = 1
@@ -159,7 +165,9 @@ class Batches:
             os.getpid(), uuid.uuid4().hex[:6])
 
     def add(self, *, agent: str, origin: str, session_id: str, cwd: str,
-            timestamp: str, role: str, text: str) -> None:
+            timestamp: str, role: str, text: str,
+            session_uid: str | None = None,
+            aliases: tuple | list = ()) -> None:
         # Unconditional: this is the one place text leaves the machine.
         text, found = redact.redact(text)
         digest = record_hash(agent, origin, session_id, timestamp, role, text)
@@ -170,11 +178,16 @@ class Batches:
         self.redacted.update(found)
         if self.dry_run:
             return
-        self.pending.append((digest, json.dumps({
+        line = {
             "v": FORMAT, "machine": self.machine, "agent": agent,
             "origin": origin, "session_id": session_id, "cwd": cwd,
             "timestamp": timestamp, "role": role, "text": text,
-        }, ensure_ascii=False)))
+            "session_uid": session_uid or sessions.derive_uid(
+                agent, self.machine, session_id, origin),
+        }
+        if aliases:
+            line["aliases"] = [list(pair) for pair in aliases]
+        self.pending.append((digest, json.dumps(line, ensure_ascii=False)))
         if len(self.pending) >= BATCH_LINES:
             self.flush()
 
@@ -326,7 +339,7 @@ def _collect(batches: Batches) -> None:
             batches.add(agent=record.agent, origin=record.origin,
                         session_id=record.session_id, cwd=record.cwd,
                         timestamp=record.timestamp, role=record.role,
-                        text=record.text)
+                        text=record.text, aliases=record.aliases)
 
 
 def _collect_index(batches: Batches, state: State) -> int | None:
@@ -345,22 +358,27 @@ def _collect_index(batches: Batches, state: State) -> int | None:
     local = config.machine_id()
     last = int(state.get("backfill_id"))
     db = store.open_for_maintenance()
+    links: dict[str, list] = {}
     try:
         while True:
             rows = db.execute(
                 "SELECT id, agent, origin, session_id, cwd, timestamp, role, "
-                "text, machine FROM chunks WHERE id > ? ORDER BY id LIMIT ?",
+                "text, machine, session_uid FROM chunks WHERE id > ? "
+                "ORDER BY id LIMIT ?",
                 (last, BACKFILL_PAGE)).fetchall()
             if not rows:
                 return last
             for (rowid, agent, origin, session_id, cwd, timestamp, role,
-                 text, machine) in rows:
+                 text, machine, uid) in rows:
                 last = rowid
                 if machine not in (None, local) or not text:
                     continue
+                if uid and uid not in links:
+                    links[uid] = sessions.links_of(db, uid)
                 batches.add(agent=agent, origin=origin or "",
                             session_id=session_id or "", cwd=cwd or "",
                             timestamp=timestamp or "", role=role or "",
-                            text=text)
+                            text=text, session_uid=uid,
+                            aliases=links.get(uid, ()))
     finally:
         db.close()

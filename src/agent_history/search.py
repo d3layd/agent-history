@@ -229,18 +229,20 @@ def fuse(lists: list[list[dict]], *, sort: str, k: int) -> list[dict]:
     return _order(fused, sort)[:k]
 
 
-_HUB_DEFAULTS = {"agent": "?", "file": "", "session_id": "", "cwd": "",
+_HUB_DEFAULTS = {"agent": "?", "file": "", "session_id": "",
+                 "session_uid": None, "cwd": "",
                  "timestamp": "", "role": "?", "machine": "hub",
                  "distance": None}
 
 
 def _as_dict(row: tuple) -> dict:
     (agent, origin, session_id, cwd, timestamp, role, text, machine,
-     distance, score) = row
+     session_uid, distance, score) = row
     return {
         "agent": agent,
         "file": origin,
         "session_id": session_id,
+        "session_uid": session_uid,
         "cwd": cwd,
         "timestamp": timestamp,
         "role": role,

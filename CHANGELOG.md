@@ -47,10 +47,31 @@ they have no corresponding tags.
   `tenants/<tenant>/`), `serve-ssh --tenants a,b` fixes which tenants a read
   key can open (from the forced command, never from the client), `--tenant`
   narrows within that list, multi-tenant searches merge and label results.
+- **Session identity** (#28): every session gets a tool-owned, immutable
+  `session_uid`, a UUIDv5 over agent, machine and source id (plus the origin
+  path for memory/doc pseudo-sessions, so `memory:MEMORY` no longer collides
+  across projects). New `sessions` and `session_aliases` tables hold the
+  source ids as metadata and aliases. Claude Code remote-control sessions are
+  linked to their `cse_…` / `session_…` ids from the transcript's
+  `bridge-session` line or `~/.claude/sessions/*.json`; when two sessions
+  prove to be one, the earliest stays canonical. `show`, `purge --session`
+  and `store.resolve_session()` accept a uid, a raw id or any alias, and
+  `search --json` / `show --json` include `session_uid`. Shipped records
+  carry `session_uid` and `aliases` (optional fields, wire format still
+  `v: 1`); the hub derives a uid for records from older shippers and ignores
+  a uid claimed for another machine's session.
+- **Chunk provenance**: new chunks record `record_id`, `chunk_ordinal`,
+  `char_start` and `char_end` (offsets into the source record), groundwork
+  for scrubbing secrets that cross a chunk boundary. Existing chunks keep
+  NULLs.
 
 ### Changed
-- Store rows carry the machine as their eighth column, so the distance now
-  follows at index 8 (internal; the JSON output only gains `machine`).
+- Store rows carry the machine as their eighth column and the canonical
+  session uid as their ninth, so the distance now follows at index 9
+  (internal; the JSON output gains `machine` and `session_uid`).
+- An existing index is upgraded in place on first open: columns and tables
+  are added and uids backfilled in one pass (about 3.6 s for a synthetic
+  94k-chunk index), with no re-embedding and no deletes.
 
 ### Fixed
 - **Hybrid search's full-text half works on natural-language queries.** Terms
