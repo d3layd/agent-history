@@ -67,6 +67,14 @@ def _set_meta(db: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+def get_meta(db: sqlite3.Connection, key: str) -> str | None:
+    return _get_meta(db, key)
+
+
+def set_meta(db: sqlite3.Connection, key: str, value: str) -> None:
+    _set_meta(db, key, value)
+
+
 def open_for_write() -> tuple[sqlite3.Connection, int]:
     """Open (creating if needed) and return the connection plus vector dimension.
 
@@ -414,6 +422,41 @@ def session_rows(
         "ORDER BY c.timestamp, c.id",
         params,
     ).fetchall()
+
+
+def rewrite_chunk(
+    db: sqlite3.Connection,
+    rowid: int,
+    *,
+    old_text: str,
+    new_text: str,
+    content_hash: str,
+    vector: list[float],
+) -> None:
+    """Replace a chunk's text in place, keeping its id and provenance."""
+    fts = fts_enabled(db)
+    if fts:
+        db.execute(
+            "INSERT INTO fts_chunks(fts_chunks, rowid, text) VALUES('delete', ?, ?)",
+            (rowid, old_text),
+        )
+    db.execute(
+        "UPDATE chunks SET text = ?, content_hash = ? WHERE id = ?",
+        (new_text, content_hash, rowid),
+    )
+    db.execute("DELETE FROM vec_chunks WHERE rowid = ?", (rowid,))
+    db.execute(
+        "INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)",
+        (rowid, embed.pack(vector)),
+    )
+    if fts:
+        db.execute(
+            "INSERT INTO fts_chunks(rowid, text) VALUES (?, ?)", (rowid, new_text)
+        )
+
+
+def delete_chunk(db: sqlite3.Connection, rowid: int, text: str) -> None:
+    _delete_rows(db, [(rowid, text)])
 
 
 def _delete_rows(db: sqlite3.Connection, rows: list[tuple]) -> int:

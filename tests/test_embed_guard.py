@@ -59,3 +59,30 @@ def test_guard_runs_before_any_request(monkeypatch):
     monkeypatch.setattr(embed.requests, "post", explode)
     with pytest.raises(embed.EmbedError):
         embed.embed("some text")
+
+
+class _Response:
+    status_code = 200
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"embedding": [0.0] * 8}
+
+
+@pytest.mark.parametrize("url, redacted", [
+    ("https://ollama.example.com", True),
+    ("http://127.0.0.1:11434", False),
+])
+def test_remote_embedding_input_is_redacted(monkeypatch, url, redacted):
+    """A remote embedder never sees a secret; a local one sees the text as is."""
+    monkeypatch.setenv("OLLAMA_URL", url)
+    monkeypatch.setenv("AGENT_HISTORY_ALLOW_REMOTE", "1")
+    monkeypatch.delenv("AGENT_HISTORY_REDACT", raising=False)
+    sent = []
+    monkeypatch.setattr(embed.requests, "post",
+                        lambda *a, **k: sent.append(k["json"]["prompt"]) or _Response())
+    text = "DATABASE_URL=postgres://app:s3cr3tP4ss@db:5432/main"
+    embed.embed(text)
+    assert ("s3cr3tP4ss" not in sent[0]) is redacted

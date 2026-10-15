@@ -150,6 +150,27 @@ def strict_enabled() -> bool:
     return strict_path().exists()
 
 
+def redact_enabled() -> bool:
+    """Secret redaction for the local index.
+
+    Off by default: on a single machine the index is often the only place a
+    credential can still be found, and recalling it is a feature. On with
+    `AGENT_HISTORY_REDACT=on`, or implied by strict mode. Anything that leaves
+    the machine (bundles, a hub) is redacted regardless of this setting.
+    """
+    env = (_env("AGENT_HISTORY_REDACT", "") or "").strip().lower()
+    if env in {"1", "on", "true", "yes"}:
+        return True
+    if env in {"0", "off", "false", "no"}:
+        return False
+    if env and "AGENT_HISTORY_REDACT" not in _warned:
+        # A typo here would silently leave secrets in the index.
+        _warned.add("AGENT_HISTORY_REDACT")
+        print(f"agent-history: AGENT_HISTORY_REDACT={env!r} not recognised; "
+              "use on or off", file=sys.stderr)
+    return strict_enabled()
+
+
 def inject_off_path() -> Path:
     """Presence disables injection. Absence = on (the default)."""
     return data_home() / "inject.off"

@@ -140,3 +140,10 @@ def test_data_home_prefers_localappdata_on_windows(monkeypatch, tmp_path):
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
     assert config.data_home() == tmp_path / "AppData" / "agent-history"
+
+
+def test_unrecognised_redact_value_warns(monkeypatch, capsys):
+    config._warned.clear()
+    monkeypatch.setenv("AGENT_HISTORY_REDACT", "enable")
+    assert config.redact_enabled() is False
+    assert "not recognised" in capsys.readouterr().err
