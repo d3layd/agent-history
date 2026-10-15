@@ -163,6 +163,11 @@ def redact_enabled() -> bool:
         return True
     if env in {"0", "off", "false", "no"}:
         return False
+    if env and "AGENT_HISTORY_REDACT" not in _warned:
+        # A typo here would silently leave secrets in the index.
+        _warned.add("AGENT_HISTORY_REDACT")
+        print(f"agent-history: AGENT_HISTORY_REDACT={env!r} not recognised; "
+              "use on or off", file=sys.stderr)
     return strict_enabled()
 
 

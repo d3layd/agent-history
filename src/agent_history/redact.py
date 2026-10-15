@@ -43,8 +43,10 @@ _PATTERNS: list[tuple[str, re.Pattern[str], int]] = [
     ("bearer", re.compile(
         r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{20,})"), 1),
     # scheme://user:password@host — database URIs, git remotes with tokens.
+    # The password runs to the last @ before the host, so one containing @
+    # is redacted whole; it never crosses into the path, query or fragment.
     ("url_password", re.compile(
-        r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@'\"<>]+:([^@\s'\"<>/]+)@"), 1),
+        r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@'\"<>]+:([^\s'\"<>/?#]+)@"), 1),
     # name = value, name: value, "name": "value", --name=value
     ("assignment", re.compile(
         r"(?i)\b[A-Za-z0-9_.-]*"

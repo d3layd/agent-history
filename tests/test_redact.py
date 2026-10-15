@@ -52,6 +52,8 @@ def test_each_class_is_redacted(text, cls):
 def test_only_the_secret_part_is_replaced():
     out, _ = redact.redact("DATABASE_URL=postgres://app:s3cr3tP4ss@db:5432/main")
     assert out == "DATABASE_URL=postgres://app:[REDACTED:url_password]@db:5432/main"
+    out, _ = redact.redact("postgres://app:p@ss@db/x?sslmode=require#a@b")
+    assert out == "postgres://app:[REDACTED:url_password]@db/x?sslmode=require#a@b"
     out, _ = redact.redact('"password": "hunter2hunter"')
     assert out == '"password": "[REDACTED:assignment]"'
 
