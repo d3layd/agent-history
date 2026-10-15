@@ -8,7 +8,8 @@ import sqlite3
 
 import pytest
 
-from agent_history import config, embed, index, search, sessions, ship, show, store
+from agent_history import (cli, config, embed, index, search, sessions, ship,
+                           show, store)
 from agent_history.adapters.inbox import InboxAdapter
 from conftest import msg
 
@@ -110,8 +111,27 @@ def test_resolve_accepts_uid_raw_id_and_alias(transcripts, fake_embed):
 
 def test_unknown_alias_kind_is_refused(fake_embed):
     db, _ = store.open_for_write()
-    with pytest.raises(ValueError):
-        sessions.link_alias(db, "x", "guess", "y")
+    for kind in ("guess", "fork_of"):  # a fork is not an alias
+        with pytest.raises(ValueError):
+            sessions.link_alias(db, "x", kind, "y")
+
+
+def test_forks_are_recorded_in_meta_not_merged(fake_embed):
+    db, _ = store.open_for_write()
+    parent = sessions.derive_uid("claude-code", "m", "parent")
+    child = sessions.derive_uid("claude-code", "m", "child")
+    for uid, sid in ((parent, "parent"), (child, "child")):
+        sessions.register_session(db, uid, agent="claude-code", machine="m",
+                                  session_id=sid, origin="/x")
+    sessions.link_fork(db, child, parent)
+    sessions.link_fork(db, child, parent)  # idempotent
+
+    def meta(uid):
+        return json.loads(db.execute("SELECT meta FROM sessions WHERE uid = ?",
+                                     (uid,)).fetchone()[0])
+    assert meta(child)["fork_of"] == parent
+    assert meta(parent)["forks"] == [child]
+    assert sessions.resolve_session(db, "child") == child
 
 
 # ------------------------------------------------------------------- bridging
@@ -222,6 +242,28 @@ def test_purge_by_alias(transcripts, fake_embed):
     index.run()
     db = store.open_for_write()[0]
     assert len(store.purge_targets(db, session=f"session_{SUFFIX}")) == 1
+
+
+def test_purge_preview_lists_every_linked_id(transcripts, fake_embed, capsys):
+    teleported = "99999999-aaaa-4bbb-8ccc-dddddddddddd"
+    transcripts("proj", "early", [
+        msg("user", "the original start of the conversation", session=SID,
+            timestamp="2026-01-01T00:00:00Z"), bridge_line()])
+    transcripts("proj", "late", [
+        msg("user", "the teleported copy continues the talk", session=teleported,
+            timestamp="2026-02-01T00:00:00Z"), bridge_line(session=teleported)])
+    index.run()
+    capsys.readouterr()
+    assert cli.main(["purge", "--session", SID]) == 0
+    out = capsys.readouterr().out
+    for linked in (sessions.derive_uid("claude-code", "testbox", SID),
+                   sessions.derive_uid("claude-code", "testbox", teleported),
+                   SID, teleported, f"cse_{SUFFIX}", f"session_{SUFFIX}"):
+        assert linked in out
+    assert "would delete 2 chunk(s)" in out
+    # the preview deleted nothing
+    db = store.open_for_read()
+    assert db.execute("SELECT count(*) FROM chunks").fetchone()[0] == 2
 
 
 def test_new_chunks_record_their_provenance(transcripts, fake_embed):
@@ -392,12 +434,11 @@ def drop(inbox, machine, *records):
 
 
 def test_hub_keeps_the_shippers_uid_and_links(inbox, fake_embed):
-    # The shipper calls itself "dennis-laptop"; its inbox directory is "laptop".
-    claimed = sessions.derive_uid("claude-code", "dennis-laptop", SID)
+    claimed = sessions.derive_uid("claude-code", "laptop", SID)
     drop(inbox, "laptop", {"text": "shipped with its own identity, long",
                            "session_uid": claimed,
                            "aliases": [["cse", f"cse_{SUFFIX}"], ["uid", "evil"],
-                                       ["source", "x"]]})
+                                       ["source", "x"], ["fork_of", "y"]]})
     (rec,) = list(InboxAdapter().records())
     assert rec.aliases == (("cse", f"cse_{SUFFIX}"),), "uid/source are hub-only"
     index.run()
@@ -406,6 +447,30 @@ def test_hub_keeps_the_shippers_uid_and_links(inbox, fake_embed):
     assert sessions.resolve_session(db, f"session_{SUFFIX}") == claimed
     assert db.execute("SELECT machine FROM sessions WHERE uid = ?",
                       (claimed,)).fetchone() == ("laptop",)
+
+
+def test_hub_derives_from_the_inbox_machine_not_the_claim(inbox, fake_embed):
+    # The shipper calls itself "dennis-laptop"; its inbox directory is "laptop".
+    # Only the directory is authenticated, so the claim is ignored.
+    drop(inbox, "laptop", {"text": "shipped under a different name, long",
+                           "session_uid": sessions.derive_uid(
+                               "claude-code", "dennis-laptop", SID)})
+    index.run()
+    assert uids_of(store.open_for_read(), session_id=SID) == {
+        sessions.derive_uid("claude-code", "laptop", SID)}
+
+
+def test_a_uid_cannot_be_squatted_before_its_owner_ships(inbox, fake_embed):
+    victim = sessions.derive_uid("claude-code", "server", SID)
+    drop(inbox, "laptop", {"text": "laptop claims the server's uid first",
+                           "session_uid": victim})
+    index.run()
+    drop(inbox, "server", {"text": "the server's own conversation, later"})
+    index.run()
+    db = store.open_for_read()
+    assert uids_of(db, machine="laptop") == {
+        sessions.derive_uid("claude-code", "laptop", SID)}
+    assert uids_of(db, machine="server") == {victim}
 
 
 def test_hub_derives_a_uid_for_old_format_records(inbox, fake_embed):

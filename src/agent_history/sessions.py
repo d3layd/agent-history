@@ -38,15 +38,15 @@ NAMESPACE = uuid.UUID("e4c875af-6959-5662-87d4-c11bd9a41c4f")
 PSEUDO_PREFIXES = ("memory:", "doc:")
 
 # `source` is the raw id; `uid` points a merged-away uid at its canonical one.
-# The rest are links between sources. Only `bridge` and `cse` are produced
-# today (Claude Code remote control); the others are reserved for the
-# export, Cowork and teleport adapters.
+# The rest are other names of the same conversation. Only `bridge` and `cse`
+# are produced today (Claude Code remote control); the others are reserved
+# for the export, Cowork and teleport adapters. A fork is a different
+# conversation, so it is not an alias: see link_fork().
 ALIAS_KINDS = ("source", "uid", "bridge", "cse", "export", "cowork",
-               "teleport", "fork_of")
+               "teleport")
 # Kinds that are evidence of *sameness*. A raw `source` id can collide (the
-# same id on two machines is not proof), and a fork is a relative, not the
-# same conversation — neither ever merges two uids.
-IDENTITY_KINDS = frozenset(ALIAS_KINDS) - {"source", "fork_of"}
+# same id on two machines is not proof), so it never merges two uids.
+IDENTITY_KINDS = frozenset(ALIAS_KINDS) - {"source"}
 BRIDGE_PREFIXES = ("cse_", "session_")
 
 SCHEMA = """
@@ -107,22 +107,14 @@ def uid_for(db: sqlite3.Connection, agent: str, machine: str | None,
             claimed: str | None = None) -> str:
     """The uid a chunk of this session is written with.
 
-    ``claimed`` is a uid a shipper sent along. It is preferred, so the hub
-    never re-derives differently from the machine that owns the session
-    (whose name may not match its inbox directory) — unless that uid already
-    belongs to a session from another machine, in which case one shipper is
-    trying to file history under someone else's conversation and the claim
-    is ignored.
+    Always the derivation from the machine the record came from — on a hub,
+    the inbox directory its authenticated key writes into. ``claimed`` (a
+    uid a shipper sent along) is accepted only when it equals that
+    derivation; anything else is ignored, so no shipper can file history
+    under a conversation it does not own, even one not indexed yet. ``db`` is
+    unused today and kept so the policy can consult the index.
     """
-    derived = derive_uid(agent, machine, session_id, origin)
-    if not claimed or claimed == derived or not valid_uid(claimed):
-        return derived
-    row = db.execute("SELECT machine FROM sessions WHERE uid = ?",
-                     (claimed,)).fetchone()
-    local = config.machine_id()
-    if row and (row[0] or local) != (machine or local):
-        return derived
-    return claimed
+    return derive_uid(agent, machine, session_id, origin)
 
 
 # -------------------------------------------------------------------- registry
@@ -172,6 +164,27 @@ def update_meta(db: sqlite3.Connection, uid: str, **fields) -> None:
     meta.update({k: v for k, v in fields.items() if v is not None})
     db.execute("UPDATE sessions SET meta = ? WHERE uid = ?",
                (json.dumps(meta, ensure_ascii=False), uid))
+
+
+def link_fork(db: sqlite3.Connection, child: str, parent: str) -> None:
+    """Record that session ``child`` was forked from ``parent``.
+
+    A fork is a relative, not the same conversation, so it lives in both
+    sessions' metadata (``fork_of`` on the child, ``forks`` on the parent)
+    rather than in the alias table. Hook for adapters that see forks; none
+    does yet.
+    """
+    update_meta(db, child, fork_of=parent)
+    row = db.execute("SELECT meta FROM sessions WHERE uid = ?",
+                     (parent,)).fetchone()
+    if row is None:
+        return
+    try:
+        forks = json.loads(row[0] or "{}").get("forks") or []
+    except ValueError:
+        forks = []
+    if child not in forks:
+        update_meta(db, parent, forks=[*forks, child])
 
 
 # --------------------------------------------------------------------- linking
@@ -323,6 +336,23 @@ def members(db: sqlite3.Connection, uid: str) -> list[str]:
     return [uid] + [row[0] for row in db.execute(
         "SELECT value FROM session_aliases WHERE kind = 'uid' "
         "AND session_uid = ?", (uid,))]
+
+
+def ids_of(db: sqlite3.Connection, uid: str) -> list[tuple[str, str]]:
+    """Every (kind, id) the session ``uid`` belongs to is known by: its
+    member uids, their raw source ids and all aliases. What a purge of the
+    session reaches, listed before anything is deleted."""
+    group = members(db, canonical(db, uid))
+    marks = ",".join("?" * len(group))
+    out = [("uid", member) for member in group]
+    out += [("source", row[0]) for row in db.execute(
+        f"SELECT DISTINCT source_session_id FROM sessions WHERE uid IN ({marks}) "
+        "AND source_session_id != '' ORDER BY 1", group)]
+    out += [tuple(row) for row in db.execute(
+        "SELECT kind, value FROM session_aliases WHERE session_uid = ? "
+        "AND kind NOT IN ('source', 'uid') ORDER BY kind, value",
+        (canonical(db, uid),))]
+    return out
 
 
 def links_of(db: sqlite3.Connection, uid: str) -> list[tuple[str, str]]:

@@ -9,7 +9,8 @@ The machine is the *directory name*, which the hub's authorized_keys pins per
 key; a ``machine`` field inside a batch is ignored, so one machine cannot file
 history under another's name. A record's ``session_uid`` and link
 ``aliases`` are taken when well-formed (older shippers send neither); the
-indexer still refuses a uid that belongs to another machine's session.
+uid itself is always derived from the directory's machine, and a claimed one
+that differs is ignored.
 
 The inbox is a queue, so this adapter is the one that retires what it read:
 after the indexer has committed, ``release()`` moves the consumed batches to

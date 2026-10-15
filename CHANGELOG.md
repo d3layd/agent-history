@@ -58,8 +58,12 @@ they have no corresponding tags.
   and `store.resolve_session()` accept a uid, a raw id or any alias, and
   `search --json` / `show --json` include `session_uid`. Shipped records
   carry `session_uid` and `aliases` (optional fields, wire format still
-  `v: 1`); the hub derives a uid for records from older shippers and ignores
-  a uid claimed for another machine's session.
+  `v: 1`). The hub always derives the uid from the sending machine's inbox
+  directory and keeps a shipped uid only when it matches, so the inbox
+  directory must be named after the machine's `AGENT_HISTORY_MACHINE`.
+  Forks are recorded in `sessions.meta` (`fork_of` / `forks`), not as
+  aliases. `purge --session` lists every linked uid, raw id and alias it
+  reaches before deleting anything.
 - **Chunk provenance**: new chunks record `record_id`, `chunk_ordinal`,
   `char_start` and `char_end` (offsets into the source record), groundwork
   for scrubbing secrets that cross a chunk boundary. Existing chunks keep

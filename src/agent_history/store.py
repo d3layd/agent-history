@@ -711,6 +711,15 @@ def purge_targets(
     ).fetchall()
 
 
+def purge_session_ids(db: sqlite3.Connection,
+                      session: str) -> list[tuple[str, str]]:
+    """Every (kind, id) a `purge --session` of ``session`` reaches: the
+    merged group's uids, raw ids and aliases. Empty if it does not resolve
+    (then only the raw id itself is matched)."""
+    uid = resolve_session(db, session)
+    return sessions.ids_of(db, uid) if uid else []
+
+
 def purge(db: sqlite3.Connection, rows: list[tuple]) -> int:
     """Permanently delete the given (id, text) rows. Returns the count."""
     removed = _delete_rows(db, rows)

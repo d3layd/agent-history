@@ -548,8 +548,16 @@ agent-history show session_01AbCdEfGhJkLmNpQrStUvWx       # its remote-control i
 ```
 
 `search --json` and `show --json` report `session_uid` next to `session_id`.
-Records shipped to a hub carry the uid and their aliases; a record from an
-older shipper without them gets a uid derived on the hub. An existing index
+Records shipped to a hub carry the uid and their aliases, but the hub only
+trusts what it can authenticate: it derives the uid from the machine that
+sent the record, which is the record's inbox directory (the one that
+machine's ingest key is pinned to in `authorized_keys`). A shipped uid is
+kept only when it matches that derivation, and any other is ignored, so no
+machine can file history under another's conversation. **Name each machine's
+inbox directory exactly as that machine's `AGENT_HISTORY_MACHINE` (or short
+hostname).** If they differ, the hub still indexes everything, but its uids
+for that machine will not match the machine's own local uids. Records from
+older shippers, which carry no uid, are derived the same way. An existing index
 is upgraded in place on first open (columns and tables added, uids backfilled
 in one pass, nothing re-embedded or deleted).
 

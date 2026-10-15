@@ -21,10 +21,11 @@ The hub dedups by content, so even a crash between the steps costs only a
 repeated upload, never a lost or doubled record.
 
 Each record also carries its session's uid and any link aliases
-(``session_uid``, ``aliases``), so the hub files it under the same
-conversation this machine does instead of re-deriving. Both fields are
-optional on the wire: a hub accepts records from older shippers without them,
-and an older hub ignores them.
+(``session_uid``, ``aliases``). The hub keeps the uid only if it equals its
+own derivation from this machine's inbox directory (the same value when the
+directory is named after ``config.machine_id()``), and links the aliases.
+Both fields are optional on the wire: a hub accepts records from older
+shippers without them, and an older hub ignores them.
 """
 from __future__ import annotations
 
