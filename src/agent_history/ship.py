@@ -42,7 +42,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
-from . import adapters, config, redact, sessions, store, textproc
+from . import adapters, config, redact, sessions, stitch, store, textproc
 
 BATCH_LINES = 2000
 FORMAT = 1
@@ -343,43 +343,56 @@ def _collect(batches: Batches) -> None:
                         text=record.text, aliases=record.aliases)
 
 
+def _index_rows(db: sqlite3.Connection, last: int, progress: list[int]):
+    """Chunks past the watermark in id order, a page at a time.
+
+    ``progress[0]`` tracks the highest id handed out."""
+    while True:
+        rows = db.execute(
+            f"SELECT {stitch.COLUMNS} FROM chunks WHERE id > ? "
+            "ORDER BY id LIMIT ?", (last, BACKFILL_PAGE)).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            last = progress[0] = row[0]
+            yield stitch.Chunk(*row)
+
+
 def _collect_index(batches: Batches, state: State) -> int | None:
-    """Export chunks already in the local index, past the watermark.
+    """Export records already in the local index, past the watermark.
 
     This covers history whose transcripts the agents have since deleted.
-    Chunks are redacted individually here (a secret cut by a chunk boundary
-    can leave a fragment — the same limit `scrub` has), and only this
-    machine's own chunks are exported, never ones merged in from elsewhere.
-    Returns the highest chunk id seen; the caller persists it once the
-    batches are safely queued.
+    Chunks are stitched back into whole records first (see ``stitch``), so a
+    secret cut by a chunk boundary is redacted whole and the text matches
+    what ``ship`` sends for the same record on disk, which the hub then
+    dedups. A chunk that cannot be stitched ships alone, its window edges
+    guarded against cut-off secret fragments. Only this machine's own chunks
+    are exported, never ones merged in from elsewhere. Returns the highest
+    chunk id seen; the caller persists it once the batches are safely queued.
     """
     if not config.db_path().exists():
         print("ship: no local index to back-fill from")
         return None
     local = config.machine_id()
     last = int(state.get("backfill_id"))
+    progress = [last]
     db = store.open_for_maintenance()
     links: dict[str, list] = {}
     try:
-        while True:
-            rows = db.execute(
-                "SELECT id, agent, origin, session_id, cwd, timestamp, role, "
-                "text, machine, session_uid FROM chunks WHERE id > ? "
-                "ORDER BY id LIMIT ?",
-                (last, BACKFILL_PAGE)).fetchall()
-            if not rows:
-                return last
-            for (rowid, agent, origin, session_id, cwd, timestamp, role,
-                 text, machine, uid) in rows:
-                last = rowid
-                if machine not in (None, local) or not text:
-                    continue
-                if uid and uid not in links:
-                    links[uid] = sessions.links_of(db, uid)
-                batches.add(agent=agent, origin=origin or "",
-                            session_id=session_id or "", cwd=cwd or "",
-                            timestamp=timestamp or "", role=role or "",
-                            text=text, session_uid=uid,
-                            aliases=links.get(uid, ()))
+        for rec in stitch.stitch(_index_rows(db, last, progress)):
+            c = rec.first
+            if c.machine not in (None, local) or not rec.text:
+                continue
+            uid = c.session_uid
+            if uid and uid not in links:
+                links[uid] = sessions.links_of(db, uid)
+            text = stitch.guard_edges(rec.text, head=not rec.head_anchored,
+                                      tail=not rec.tail_anchored)
+            batches.add(agent=c.agent, origin=c.origin or "",
+                        session_id=c.session_id or "", cwd=c.cwd or "",
+                        timestamp=c.timestamp or "", role=c.role or "",
+                        text=text, session_uid=uid,
+                        aliases=links.get(uid, ()))
+        return progress[0]
     finally:
         db.close()
