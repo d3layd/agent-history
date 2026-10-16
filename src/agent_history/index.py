@@ -13,7 +13,7 @@ import sys
 import time
 from collections import Counter
 
-from . import adapters, config, embed, redact, store, textproc
+from . import adapters, config, embed, redact, sessions, store, textproc
 
 COMMIT_EVERY = 16
 
@@ -43,8 +43,8 @@ def _guard_reindex(force: bool) -> int | None:
     if chunks == 0 or force:
         return None
     print(
-        f"reindex refused: {chunks} chunk(s) from {origins} deleted "
-        "source(s) exist only in this index and would be lost.\n"
+        f"reindex refused: {chunks} chunk(s) from {origins} deleted or "
+        "imported source(s) exist only in this index and would be lost.\n"
         "  changing embedding model?  agent-history reembed   (keeps everything)\n"
         "  really discard them?       agent-history reindex --force",
         file=sys.stderr,
@@ -59,35 +59,69 @@ def redacted_chunks(text: str) -> list[str]:
     on the original, so turning redaction on never moves a boundary: every
     chunk without a secret keeps the exact text (and hash) it had before.
     """
+    return [piece for _start, _end, piece in redacted_pieces(text)]
+
+
+def redacted_pieces(text: str) -> list[tuple[int, int, str]]:
+    """``redacted_chunks`` with each chunk's (start, end) offsets into
+    ``text`` — the provenance a chunk is stored with."""
     bounds = textproc.chunk_spans(text)
     if not config.redact_enabled():
-        return [text[start:end] for start, end in bounds]
+        return [(start, end, text[start:end]) for start, end in bounds]
     found = redact.spans(text)
-    return [redact.apply(text[start:end], found, start) for start, end in bounds]
+    return [(start, end, redact.apply(text[start:end], found, start))
+            for start, end in bounds]
+
+
+def record_id(record: adapters.Record) -> str:
+    """A stable id for the record a chunk was cut from.
+
+    Chunks of one record share it, which (with the ordinal and offsets) lets
+    a later pass reassemble text that a chunk boundary split. Hashed over the
+    redacted text when redaction is on, so the id derives from nothing the
+    index does not hold.
+    """
+    text = record.text
+    if config.redact_enabled():
+        text = redact.apply(text, redact.spans(text), 0)
+    payload = json.dumps([record.agent, record.origin, record.session_id,
+                          record.timestamp, record.role, text],
+                         ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
 def _pending(
     seen: set[str],
     counts: Counter[str] | None = None,
-) -> tuple[list[tuple[adapters.Record, str, str]], set[str], list[tuple[str, str]]]:
+    active: list | None = None,
+    links: dict | None = None,
+) -> tuple[list[tuple], set[str], list[tuple[str, str]]]:
     """Collect what needs indexing, and what mutable sources currently hold.
 
     Returns (new chunks to embed, every hash produced this run, the
     (agent, origin) pairs of mutable sources that were scanned). The latter
     two feed stale-chunk removal: only re-read mutable origins are eligible,
-    and nothing produced this run may be deleted.
+    and nothing produced this run may be deleted. Each new chunk is
+    (record, text, hash, (record id, ordinal, start, end)).
+
+    ``links``, when given, collects one record per session that carries
+    aliases, so they are linked even when nothing in the session is new.
     """
-    out: list[tuple[adapters.Record, str, str]] = []
+    out: list[tuple] = []
     produced: set[str] = set()
     mutable_targets: set[tuple[str, str]] = set()
-    for adapter in adapters.available_adapters():
+    for adapter in (adapters.available_adapters() if active is None else active):
         count = 0
         for record in adapter.records():
             # Never index this tool's own injected recall — re-indexing it
             # would compound into a memories-about-memories feedback loop.
             if textproc.is_injection(record.text):
                 continue
-            for piece in redacted_chunks(record.text):
+            if links is not None and record.aliases:
+                links.setdefault(_session_key(record), record)
+            rid = None
+            for ordinal, (start, end, piece) in enumerate(
+                    redacted_pieces(record.text)):
                 digest = hashlib.sha256(piece.encode("utf-8")).hexdigest()
                 produced.add(digest)
                 if digest in seen:
@@ -95,7 +129,8 @@ def _pending(
                 seen.add(digest)
                 if counts is not None and "[REDACTED:" in piece:
                     counts.update(redact.markers(piece))
-                out.append((record, piece, digest))
+                rid = rid or record_id(record)
+                out.append((record, piece, digest, (rid, ordinal, start, end)))
                 count += 1
         if getattr(adapter, "mutable", False):
             # Eligibility comes from what was read, not what was yielded —
@@ -109,6 +144,59 @@ def _pending(
     return out, produced, sorted(mutable_targets)
 
 
+def _session_key(record: adapters.Record) -> tuple:
+    return (record.agent, record.machine, record.session_id, record.origin,
+            record.session_uid)
+
+
+class _Uids:
+    """Each record's session uid, worked out once per session per run."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self.db = db
+        self.cache: dict[tuple, str] = {}
+
+    def __call__(self, record: adapters.Record) -> str:
+        key = _session_key(record)
+        if key not in self.cache:
+            self.cache[key] = sessions.uid_for(
+                self.db, record.agent, record.machine, record.session_id,
+                record.origin, claimed=record.session_uid)
+        return self.cache[key]
+
+
+def _link_sessions(db: sqlite3.Connection, links: dict, uids: _Uids) -> None:
+    """Apply the aliases adapters found. Re-applying a link is a no-op, so
+    this runs on every pass over sources that carry them."""
+    for record in links.values():
+        uid = uids(record)
+        sessions.register_session(
+            db, uid, agent=record.agent,
+            machine=record.machine or config.machine_id(),
+            session_id=record.session_id, origin=record.origin,
+            timestamp=record.timestamp, cwd=record.cwd)
+        target = uid
+        for kind, value in record.aliases:
+            if kind in ("cse", "bridge"):
+                target = sessions.link_bridge(db, target, value)
+            else:
+                target = sessions.link_alias(db, target, kind, value)
+    db.commit()
+
+
+def _release_consumed(active: list) -> None:
+    """Let queue-like adapters (the hub inbox) retire what this run read.
+
+    Called only once everything read has been committed and nothing was
+    skipped, so a crash or an embed failure just means the same batches are
+    read again — content-hash dedup makes that free.
+    """
+    for adapter in active:
+        release = getattr(adapter, "release", None)
+        if callable(release):
+            release()
+
+
 def run(reindex: bool = False, force: bool = False) -> int:
     if reindex:
         code = _guard_reindex(force)
@@ -119,6 +207,10 @@ def run(reindex: bool = False, force: bool = False) -> int:
 
     active = adapters.available_adapters()
     if not active:
+        if config.hub_mode():
+            print("hub mode: no inbox to index. Set AGENT_HISTORY_INBOX to an "
+                  "existing directory.", file=sys.stderr)
+            return 1
         print("No agent transcripts found on this machine.", file=sys.stderr)
         print("Checked: ~/.claude/projects, ~/.codex/sessions, "
               "~/.local/share/opencode, ~/.hermes*/state.db "
@@ -132,7 +224,9 @@ def run(reindex: bool = False, force: bool = False) -> int:
     print(f"Already indexed: {len(seen)} chunk(s)")
 
     counts: Counter[str] = Counter()
-    pending, produced, mutable_targets = _pending(seen, counts)
+    links: dict = {}
+    pending, produced, mutable_targets = _pending(seen, counts, active, links)
+    uids = _Uids(db)
     if counts:
         print("redacted in new chunks: " + ", ".join(f"{n} {cls}" for cls, n in counts.most_common()))
     store.set_meta(db, "redact_last", json.dumps({
@@ -148,16 +242,26 @@ def run(reindex: bool = False, force: bool = False) -> int:
     stale = store.remove_stale(db, mutable_targets, keep=produced)
     if stale:
         print(f"docs refresh: removed {stale} stale chunk(s)")
+    if links:
+        _link_sessions(db, links, uids)
 
     if not pending:
         print("Up to date.")
+        _release_consumed(active)
         return 0
 
+    return _embed_pending(db, pending, uids, active)
+
+
+def _embed_pending(db, pending: list[tuple], uids: "_Uids",
+                   active: list = ()) -> int:
+    """Embed and store `pending` chunks, committing as it goes. Queue-like
+    sources in `active` are released only when nothing was skipped."""
     print(f"Embedding {len(pending)} new chunk(s)...")
     started = time.time()
     failures = 0
 
-    for position, (record, text, digest) in enumerate(pending, 1):
+    for position, (record, text, digest, where) in enumerate(pending, 1):
         try:
             vector = embed.embed(text)
         except embed.EmbedError as exc:
@@ -181,6 +285,12 @@ def run(reindex: bool = False, force: bool = False) -> int:
             text=text,
             content_hash=digest,
             vector=vector,
+            machine=record.machine,
+            session_uid=uids(record),
+            record_id=where[0],
+            chunk_ordinal=where[1],
+            char_start=where[2],
+            char_end=where[3],
         )
 
         if position % COMMIT_EVERY == 0:
@@ -194,7 +304,88 @@ def run(reindex: bool = False, force: bool = False) -> int:
     print(f"Done in {time.time() - started:.1f}s.")
     if failures:
         print(f"({failures} chunk(s) skipped due to embed errors)", file=sys.stderr)
+    else:
+        _release_consumed(active)
     return 0
+
+
+# -------------------------------------------------------------------- import
+
+def run_import(source, *, dry_run: bool = False) -> int:
+    """Index one on-demand source (an export directory) through the normal path.
+
+    Imports are not registered adapters — a data export is a snapshot, not
+    something to re-parse on every hook — but they are chunked, hashed,
+    deduplicated and embedded exactly like everything else, so re-importing
+    a newer export adds only what is new.
+    """
+    if not source.available():
+        print(f"nothing importable found under {source.root}", file=sys.stderr)
+        return 1
+    if dry_run:
+        return _import_dry_run(source)
+
+    from . import trigger
+
+    # Hold the indexing lock: a hook-triggered `index` running concurrently
+    # would race this run on the same content hashes.
+    with trigger._exclusive(config.lock_path()) as acquired:
+        if not acquired:
+            print("another indexing run holds the lock; retry shortly",
+                  file=sys.stderr)
+            return 1
+        db, _dimension = store.open_for_write()
+        seen = store.existing_hashes(db)
+        print(f"Already indexed: {len(seen)} chunk(s)")
+        counts: Counter[str] = Counter()
+        links: dict = {}
+        pending, _produced, _mutable = _pending(seen, counts, [source], links)
+        _print_import_stats(source)
+        if counts:
+            print("redacted in new chunks: " + ", ".join(
+                f"{n} {cls}" for cls, n in counts.most_common()))
+        uids = _Uids(db)
+        if links:
+            _link_sessions(db, links, uids)
+        if not pending:
+            print("Up to date.")
+            return 0
+        return _embed_pending(db, pending, uids)
+
+
+def _import_dry_run(source) -> int:
+    """Parse and count, touching neither the index nor Ollama."""
+    started = time.time()
+    roles: Counter[str] = Counter()
+    chunks = 0
+    hashes: set[str] = set()
+    first = last = ""
+    for record in source.records():
+        if textproc.is_injection(record.text):
+            continue
+        roles[record.role] += 1
+        if record.timestamp:
+            first = min(first or record.timestamp, record.timestamp)
+            last = max(last, record.timestamp)
+        for piece in chunk_text(record.text):
+            chunks += 1
+            hashes.add(hashlib.sha256(piece.encode("utf-8")).hexdigest())
+    elapsed = time.time() - started
+    print(f"dry run: {source.root} (nothing written)")
+    _print_import_stats(source)
+    print(f"  records:                {sum(roles.values())}")
+    for role, count in sorted(roles.items()):
+        print(f"    {role}: {count}")
+    print(f"  date range:             {first[:10] or '?'} .. {last[:10] or '?'}")
+    print(f"  chunks:                 {chunks} ({len(hashes)} unique)")
+    print(f"  parse time:             {elapsed:.1f}s")
+    return 0
+
+
+def _print_import_stats(source) -> None:
+    stats = getattr(source, "stats", None) or {}
+    for key in sorted(stats):
+        print(f"  {key + ':':<24}{stats[key]}")
 
 
 # ------------------------------------------------------------------- reembed

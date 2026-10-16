@@ -9,7 +9,103 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
-## [Unreleased]
+## [0.17.0] — 2026-10-15
+
+### Added
+- **Hub: one central index that every machine feeds and every session can
+  search** (#25). See the README's "Hub (central history)" section and the
+  examples in `deploy/`.
+- **`agent-history ship`** sends redacted Records to a hub
+  (`AGENT_HISTORY_HUB_INGEST`, optional `AGENT_HISTORY_HUB_KEY`). Every record
+  is redacted unconditionally, ignoring the local `AGENT_HISTORY_REDACT`.
+  New records go into immutable JSONL batches in an outbox and are uploaded
+  with `rsync --remove-source-files`; a record is marked shipped only after
+  its batch has been delivered, so a failed upload loses and duplicates
+  nothing. `--dry-run` reports counts only; `--backfill-from-index` also
+  exports chunks already in the local index (watermarked). Overlapping runs
+  no-op under a lock, and the SessionEnd/PreCompact `trigger` ships after
+  indexing when the destination is set.
+- **Machine provenance**: a `machine` column on chunks (added in place, no
+  re-embed; old rows count as this machine), `config.machine_id()`
+  (`AGENT_HISTORY_MACHINE` or the short hostname), `Record.machine`, a
+  `search --machine` filter and `--exclude-machine`, and `@machine` on results
+  and in `show` when it is not the local one. `doctor` lists per-machine counts.
+- **Hub mode**: `AGENT_HISTORY_INBOX` enables an inbox adapter reading
+  `<inbox>/<machine>/*.jsonl` (the machine is the directory name, never a
+  field in the file); consumed batches move to `.processed/` only after the
+  index run commits. `AGENT_HISTORY_HUB=1` indexes only the inbox and forces
+  redaction on.
+- **Remote search**: `AGENT_HISTORY_REMOTE=ssh://user@host[:port]` (and
+  `AGENT_HISTORY_REMOTE_KEY`). `search` merges local and hub results by
+  reciprocal-rank fusion (hub only when there is no local index) and fails
+  open with a one-line warning if the hub is unreachable; `show` falls back to
+  the hub. `--local` / `--hub` force one side.
+- **`agent-history serve-ssh`** for `command="...",restrict` in the hub's
+  authorized_keys: only `search` and `show`, validated by the normal parser,
+  run in-process, never through a shell.
+- **Tenancy**: one index file per tenant (`inbox/<tenant>/<machine>/`,
+  `tenants/<tenant>/`), `serve-ssh --tenants a,b` fixes which tenants a read
+  key can open (from the forced command, never from the client), `--tenant`
+  narrows within that list, multi-tenant searches merge and label results.
+- **Session identity** (#28): every session gets a tool-owned, immutable
+  `session_uid`, a UUIDv5 over agent, machine and source id (plus the origin
+  path for memory/doc pseudo-sessions, so `memory:MEMORY` no longer collides
+  across projects). New `sessions` and `session_aliases` tables hold the
+  source ids as metadata and aliases. Claude Code remote-control sessions are
+  linked to their `cse_…` / `session_…` ids from the transcript's
+  `bridge-session` line or `~/.claude/sessions/*.json`; when two sessions
+  prove to be one, the earliest stays canonical. `show`, `purge --session`
+  and `store.resolve_session()` accept a uid, a raw id or any alias, and
+  `search --json` / `show --json` include `session_uid`. Shipped records
+  carry `session_uid` and `aliases` (optional fields, wire format still
+  `v: 1`). The hub always derives the uid from the sending machine's inbox
+  directory and keeps a shipped uid only when it matches, so the inbox
+  directory must be named after the machine's `AGENT_HISTORY_MACHINE`.
+  Forks are recorded in `sessions.meta` (`fork_of` / `forks`), not as
+  aliases. `purge --session` lists every linked uid, raw id and alias it
+  reaches before deleting anything.
+- **Chunk provenance**: new chunks record `record_id`, `chunk_ordinal`,
+  `char_start` and `char_end` (offsets into the source record), groundwork
+  for scrubbing secrets that cross a chunk boundary. Existing chunks keep
+  NULLs.
+- **`agent-history mcp`: the hub over MCP** (#28), for claude.ai through an
+  MCP router. Tools: `history_recall` (search, `k` capped at 20, 700-char
+  excerpts, no origin paths), `history_show` (a session, at most 50 messages
+  of 1500 chars) and `history_record` (append-only chat records: title,
+  summary, decisions, findings, links, chat URL, project). Records are
+  redacted and written as immutable batches into the tenant's inbox under
+  the token's machine name, agent `claude-ai-chat`, so the indexer handles
+  them like shipped Records. Streamable HTTP (stateless, JSON responses) on
+  127.0.0.1:8765, non-loopback refused without `--allow-non-loopback`;
+  `--stdio` for local use. Bearer tokens with `read` or `write` scope and
+  exactly one tenant, stored as SHA-256 hashes in a `0600` file
+  (`agent-history mcp token add|list|revoke`, reloaded on change) or given
+  in the environment; constant-time comparison, 401 before MCP, tool list
+  filtered by scope, per-token rate limits. Session ids use `session_uid`
+  and `store.resolve_session` when the index has them. Optional dependency:
+  `agent-history[mcp]`. Example unit: `deploy/hub/agent-history-mcp.service`;
+  draft claude.ai profile instruction: `docs/claude-ai-profile-instruction.md`.
+
+- **`agent-history import claude-ai <export-dir>`** backfills claude.ai chats
+  from the official data export (#28). Chat text, conversation titles and
+  summaries, extracted attachment text (capped at 100k characters each),
+  project docs and instructions, memories and Claude Design chats are indexed
+  under agent `claude-ai`, with the conversation uuid as session id and
+  `claude.ai` / `claude.ai/project/<name>` as the location. Re-importing a
+  newer export adds only new text via the existing content-hash dedup.
+  `--dry-run` parses and counts without the index or Ollama. The
+  conversations file is streamed, so a 180 MB export parses in ~5 s at
+  ~100 MB peak memory.
+
+### Changed
+- `reindex` now also refuses (without `--force`) to wipe imported claude.ai
+  chunks: no adapter re-reads an export, so the index is their only copy.
+- Store rows carry the machine as their eighth column and the canonical
+  session uid as their ninth, so the distance now follows at index 9
+  (internal; the JSON output gains `machine` and `session_uid`).
+- An existing index is upgraded in place on first open: columns and tables
+  are added and uids backfilled in one pass (about 3.6 s for a synthetic
+  94k-chunk index), with no re-embedding and no deletes.
 
 ### Fixed
 - **Hybrid search's full-text half works on natural-language queries.** Terms

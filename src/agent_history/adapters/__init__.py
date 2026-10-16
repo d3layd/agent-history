@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol, runtime_checkable
 
+from .. import config
+
 
 @dataclass(frozen=True)
 class Record:
@@ -25,6 +27,15 @@ class Record:
     timestamp: str  # ISO 8601
     role: str
     text: str
+    # Which machine the message came from. None means "this one"; only the hub
+    # inbox sets it, from the directory a shipper uploaded into.
+    machine: str | None = None
+    # The session's uid when the source already knows it — only shipped
+    # records carry one; everything else is derived (see sessions.py).
+    session_uid: str | None = None
+    # (kind, value) links to the session's other ids, found on hard
+    # evidence by the adapter, e.g. ("cse", "cse_01…") for remote control.
+    aliases: tuple[tuple[str, str], ...] = ()
 
 
 @runtime_checkable
@@ -41,14 +52,26 @@ class Adapter(Protocol):
         """Every indexable message this agent has stored."""
 
 
+# Agents whose records arrive only through `agent-history import` (a data
+# export, read once on demand) rather than a registered adapter. A rebuild
+# from disk cannot recreate them, so `reindex` treats them like deleted
+# sources and refuses to wipe them without --force.
+IMPORT_ONLY_AGENTS = frozenset({"claude-ai"})
+
+
 def all_adapters() -> list[Adapter]:
     from .claude_code import ClaudeCodeAdapter
     from .codex import CodexAdapter
     from .docs import DocsAdapter
     from .hermes import HermesAdapter
+    from .inbox import InboxAdapter
     from .openclaw import OpenClawAdapter
     from .opencode import OpenCodeAdapter
 
+    # The hub indexes what machines ship it and nothing local: whatever
+    # transcripts happen to sit on that box are not its history.
+    if config.hub_mode():
+        return [InboxAdapter()]
     return [
         ClaudeCodeAdapter(),
         CodexAdapter(),
@@ -56,6 +79,7 @@ def all_adapters() -> list[Adapter]:
         HermesAdapter(),
         OpenClawAdapter(),
         DocsAdapter(),
+        InboxAdapter(),
     ]
 
 

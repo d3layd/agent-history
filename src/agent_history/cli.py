@@ -7,11 +7,11 @@ import json
 import sys
 
 from . import (__version__, adapters, config, embed, index, inject, scrub,
-               search, show, store, trigger, viewer)
+               search, ship, show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub"}
+            "purge", "strict", "scrub", "ship", "serve-ssh", "mcp", "import"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -48,6 +48,15 @@ def _build_parser() -> argparse.ArgumentParser:
     scr.add_argument("--yes", action="store_true",
                      help="rewrite the affected chunks; without it, only previews")
 
+    imp = sub.add_parser(
+        "import",
+        help="backfill from a data export (claude.ai), deduplicated on re-import")
+    imp.add_argument("kind", choices=["claude-ai"],
+                     help="export format")
+    imp.add_argument("path", help="the unpacked export directory")
+    imp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="parse and count only — no index, no Ollama")
+
     strict = sub.add_parser(
         "strict", help="compliance profile: injection off + scoped to project")
     strict.add_argument("action", nargs="?", default="status",
@@ -66,6 +75,24 @@ def _build_parser() -> argparse.ArgumentParser:
     trig.add_argument("--foreground", action="store_true",
                       help="wait for indexing instead of detaching")
 
+    shp = sub.add_parser(
+        "ship", help="send redacted records to the hub "
+                     "(AGENT_HISTORY_HUB_INGEST)")
+    shp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="report what would be sent; write and upload nothing")
+    shp.add_argument("--backfill-from-index", action="store_true",
+                     dest="backfill",
+                     help="also send chunks already in the local index "
+                          "(covers transcripts no longer on disk)")
+
+    ssh = sub.add_parser(
+        "serve-ssh",
+        help="for authorized_keys command=: run only search/show from "
+             "$SSH_ORIGINAL_COMMAND")
+    ssh.add_argument("--tenants", metavar="A[,B...]",
+                     help="tenant indexes this key may read (hub only); "
+                          "taken from the forced command, never from the client")
+
     find = sub.add_parser("search", help="search the index")
     find.add_argument("query", nargs="+")
     find.add_argument("-k", type=int, default=8, help="results to return (default 8)")
@@ -75,6 +102,12 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="hybrid (default), vector, or text (no Ollama needed)")
     find.add_argument("--sort", choices=search.SORTS, default="relevance",
                       help="relevance (default; near-ties favour newer) or newest")
+    find.add_argument("--machine", help="only chunks from this machine")
+    find.add_argument("--exclude-machine", action="append", metavar="MACHINE",
+                      help="leave out chunks from this machine (repeatable)")
+    find.add_argument("--tenant", help="hub tenant to search (default: all "
+                                       "this key may read)")
+    _add_where(find)
     find.add_argument("--full", action="store_true", help="print full chunk text")
     find.add_argument("--json", action="store_true", dest="as_json")
 
@@ -86,6 +119,8 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="centre the window on this timestamp instead of the end")
     ctx.add_argument("--limit", type=int, default=40,
                      help="chunks to print (default 40)")
+    ctx.add_argument("--tenant", help="hub tenant the conversation is in")
+    _add_where(ctx)
     ctx.add_argument("--json", action="store_true", dest="as_json")
 
     serve = sub.add_parser(
@@ -105,7 +140,85 @@ def _build_parser() -> argparse.ArgumentParser:
     doc.add_argument("action", nargs="?", default="list",
                      choices=["add", "remove", "list"])
     doc.add_argument("path", nargs="?", help="directory, for add/remove")
+
+    mcp = sub.add_parser(
+        "mcp", help="MCP server for history_recall / history_show / "
+                    "history_record (needs the [mcp] extra)")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command")
+    mserve = mcp_sub.add_parser(
+        "serve", help="run the server (default: Streamable HTTP on 127.0.0.1)")
+    # `mcp --port 1` and `mcp serve --port 1` both work; the subcommand's
+    # copies default to SUPPRESS so they never overwrite the parent's values.
+    for target, fallback in ((mcp, None), (mserve, argparse.SUPPRESS)):
+        def default(value, fallback=fallback):
+            return value if fallback is None else fallback
+        target.add_argument("--stdio", action="store_true", default=default(False),
+                            help="speak stdio instead of HTTP; the token comes "
+                                 "from AGENT_HISTORY_MCP_TOKEN")
+        target.add_argument("--host", default=default("127.0.0.1"),
+                            help="bind address (default 127.0.0.1)")
+        target.add_argument("--port", type=_port, default=default(8765),
+                            help="port (default 8765)")
+        target.add_argument("--allow-non-loopback", action="store_true",
+                            default=default(False),
+                            help="permit a non-loopback --host (only behind an "
+                                 "authenticating TLS proxy)")
+    mtok = mcp_sub.add_parser("token", help="manage bearer tokens (hashes only "
+                                            "are stored, in a 0600 file)")
+    mtok_sub = mtok.add_subparsers(dest="token_command", required=True)
+    tadd = mtok_sub.add_parser("add", help="create a token and print it once")
+    tadd.add_argument("name")
+    tadd.add_argument("--scope", required=True, action="append",
+                      choices=["read", "write"],
+                      help="read (recall/show) or write (record); repeatable, "
+                           "but prefer one scope per token")
+    tadd.add_argument("--tenant", help="the one tenant index this token opens "
+                                       "(omit on a hub without tenants)")
+    tadd.add_argument("--machine", help="provenance for records written with "
+                                        "this token (default mcp-<name>)")
+    mtok_sub.add_parser("list", help="names, scopes and tenants (no secrets)")
+    trev = mtok_sub.add_parser("revoke", help="delete a token")
+    trev.add_argument("name")
     return parser
+
+
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    from . import mcp_auth, mcp_server
+
+    if args.mcp_command in (None, "serve"):
+        return mcp_server.serve(
+            transport="stdio" if args.stdio else "http", host=args.host,
+            port=args.port, allow_non_loopback=args.allow_non_loopback)
+    try:
+        if args.token_command == "add":
+            token = mcp_auth.add_token(args.name, args.scope, args.tenant,
+                                       args.machine)
+            print(token)
+            print(f"stored the hash of token {args.name!r} in "
+                  f"{mcp_auth.tokens_path()}; the token itself is shown only "
+                  "this once", file=sys.stderr)
+            return 0
+        if args.token_command == "list":
+            for entry in mcp_auth.list_tokens():
+                print(json.dumps(entry))
+            return 0
+        if mcp_auth.revoke_token(args.name):
+            print(f"revoked {args.name!r}")
+            return 0
+        print(f"no token named {args.name!r}", file=sys.stderr)
+        return 1
+    except mcp_auth.TokenConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _add_where(parser: argparse.ArgumentParser) -> None:
+    """--local / --hub: pin a command to one side when AGENT_HISTORY_REMOTE is set."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--local", dest="where", action="store_const",
+                       const="local", help="only this machine's index")
+    group.add_argument("--hub", dest="where", action="store_const",
+                       const="hub", help="only the hub (AGENT_HISTORY_REMOTE)")
 
 
 def _port(value: str) -> int:
@@ -214,6 +327,14 @@ def _cmd_purge(args) -> int:
         return 1
 
     target = "the ENTIRE index" if args.everything else "matching chunks"
+    if args.session:
+        # --session reaches every session linked to the one named, so say
+        # exactly which ids that covers before anything can be deleted.
+        linked = store.purge_session_ids(db, args.session)
+        if len(linked) > 1:
+            print(f"--session {args.session} covers {len(linked)} linked id(s):")
+            for kind, value in linked:
+                print(f"  {kind:8} {value}")
     if not args.yes:
         print(f"would delete {len(rows)} chunk(s) ({target}).")
         print("this is permanent and cannot be undone. re-run with --yes to do it.")
@@ -221,6 +342,18 @@ def _cmd_purge(args) -> int:
     removed = store.purge(db, rows)
     print(f"purged {removed} chunk(s) — permanently deleted from the index.")
     return 0
+
+
+def _cmd_import(kind: str, path: str, *, dry_run: bool) -> int:
+    from pathlib import Path
+
+    from .adapters.claude_ai import ClaudeAiExport
+
+    root = Path(path).expanduser()
+    if not root.is_dir():
+        print(f"error: not a directory: {root}", file=sys.stderr)
+        return 1
+    return index.run_import(ClaudeAiExport(root), dry_run=dry_run)
 
 
 def _cmd_strict(action: str) -> int:
@@ -260,6 +393,15 @@ def _cmd_doctor() -> int:
                              else "off — secrets are indexed verbatim "
                                   "(AGENT_HISTORY_REDACT=on or strict to enable)"))
 
+    print(f"machine:    {config.machine_id()}")
+    if config.hub_mode():
+        print(f"hub:        THIS install is a hub (inbox {config.inbox_dir()}; "
+              "redaction forced)")
+    if config.hub_ingest():
+        print(f"ship to:    {config.hub_ingest()}  (agent-history ship)")
+    if config.remote_url():
+        print(f"search hub: {config.remote_url()}")
+
     ok, detail = embed.reachable()
     print(f"ollama up:  {'yes' if ok else 'NO'} ({detail})")
 
@@ -298,6 +440,9 @@ def _cmd_doctor() -> int:
     print(f"chunks:     {info['total']}")
     for agent, count in info["per_agent"].items():
         print(f"              {agent}: {count}")
+    if len(info["per_machine"]) > 1:
+        for name, count in info["per_machine"].items():
+            print(f"              @{name}: {count}")
     print(f"built with: {info['model']} ({info['dimension']}-dim)")
     last = store.get_meta(db, "redact_last")
     if last:
@@ -330,7 +475,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(_normalise(list(sys.argv[1:] if argv is None else argv)))
+    return dispatch(parser, args)
 
+
+def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run a parsed command. Shared with `serve-ssh`, which parses its own."""
     if args.command is None:
         parser.print_help()
         return 0
@@ -358,16 +507,28 @@ def main(argv: list[str] | None = None) -> int:
                 k=args.k,
                 cwd=args.cwd,
                 agent=args.agent,
+                machine=args.machine,
+                exclude_machine=args.exclude_machine,
                 mode=args.mode,
                 sort=args.sort,
                 full=args.full,
                 as_json=args.as_json,
+                where=args.where,
+                tenant=args.tenant,
             )
         if args.command == "show":
             return show.run(args.target, around=args.around,
-                            limit=args.limit, as_json=args.as_json)
+                            limit=args.limit, as_json=args.as_json,
+                            where=args.where, tenant=args.tenant)
+        if args.command == "ship":
+            return ship.run(dry_run=args.dry_run, backfill=args.backfill)
+        if args.command == "serve-ssh":
+            from . import serve_ssh
+            return serve_ssh.run(args.tenants)
         if args.command == "serve":
             return viewer.run(port=args.port)
+        if args.command == "mcp":
+            return _cmd_mcp(args)
         if args.command == "inject":
             if args.action == "run":
                 return inject.run_hook()
@@ -384,6 +545,9 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_strict(args.action)
         if args.command == "scrub":
             return scrub.run(yes=args.yes)
+
+        if args.command == "import":
+            return _cmd_import(args.kind, args.path, dry_run=args.dry_run)
     except (store.StoreError, embed.EmbedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -1,0 +1,21 @@
+# systemd USER unit: send this machine's new history to the hub.
+#   mkdir -p ~/.config/agent-history ~/.config/systemd/user
+#   cp agent-history-ship.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now agent-history-ship.timer
+#
+# ~/.config/agent-history/env (mode 0600) holds the destination. systemd does
+# not expand %h or ~ inside an EnvironmentFile, so write real paths:
+#   AGENT_HISTORY_HUB_INGEST=ahub@hub.example.invalid:
+#   AGENT_HISTORY_HUB_KEY=/home/you/.ssh/agent-history-ingest
+#   AGENT_HISTORY_MACHINE=pc
+[Unit]
+Description=agent-history: ship redacted history to the hub
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/agent-history/env
+# Records are redacted before they leave, whatever the local setting is.
+ExecStart=%h/.local/bin/agent-history ship
+# A hub that is down is not an error worth a red unit: the batches stay in the
+# outbox and go out on the next run.
+SuccessExitStatus=1

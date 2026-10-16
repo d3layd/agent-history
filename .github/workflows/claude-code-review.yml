@@ -1,0 +1,51 @@
+name: Claude Code Review
+
+# Reviews every PR opened or updated by the repo's owner, members or
+# collaborators. This repo is public, so PRs from anyone else don't run it
+# (and fork PRs never receive the secret anyway).
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+jobs:
+  claude-review:
+    if: |
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        # Pinned to the same release as Atrium's review workflow, off the
+        # moving `v1` tag. Bump deliberately.
+        uses: anthropics/claude-code-action@v1.0.162
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Review this pull request for:
+            - Correctness bugs and edge cases
+            - Data safety: agent-history stores people's only copy of old
+              conversations, so anything that can delete, overwrite or
+              re-derive stored chunks, vectors or session ids is high risk
+            - Secret handling: redaction must happen before anything leaves
+              the machine (ship, MCP record, remote embedding); flag any path
+              that can leak a secret or a fragment of one
+            - Security of the hub surfaces (serve-ssh, MCP auth, inbox)
+            - Test coverage, including Windows (no POSIX-only assertions)
+
+            Follow the conventions in README.md and CHANGELOG.md. Be specific:
+            cite file and line, say what breaks and how to fix it.
+
+            Use `gh pr comment` with your Bash tool to leave your review as a
+            comment on the PR.
+          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'

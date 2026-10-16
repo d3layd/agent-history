@@ -111,6 +111,13 @@ def _anything_changed(stamp: Path) -> bool:
     from . import adapters
 
     for adapter in adapters.available_adapters():
+        # A queue (the hub inbox) has no "newer than the stamp": unread
+        # batches are the change, and stay one until they are retired.
+        pending = getattr(adapter, "has_pending", None)
+        if callable(pending):
+            if pending():
+                return True
+            continue
         # An adapter that knows its own eligible file set (pruned vendored
         # dirs, size caps) names it via watch_files(), so an ineligible file
         # changing can never wake the indexer.
@@ -155,7 +162,7 @@ def run(label: str, *, if_changed: bool = False, foreground: bool = False,
         _relaunch_detached(argv)
         return 0
 
-    data = config.ensure_data_home()
+    config.ensure_data_home()
     stamp = config.stamp_path()
     log = config.log_path()
 
@@ -188,4 +195,25 @@ def run(label: str, *, if_changed: bool = False, foreground: bool = False,
             finally:
                 sys.stdout, sys.stderr = original
         config.secure_file(log)
-        return code
+
+    # Shipping needs no embedder and holds its own lock, so it runs after the
+    # index lock is released and never delays the next index run. Its result
+    # does not change the trigger's: the hook is about indexing.
+    if config.hub_ingest() and not config.hub_mode():
+        _ship_logged(log)
+    return code
+
+
+def _ship_logged(log: Path) -> None:
+    from . import ship
+
+    with open(log, "a", encoding="utf-8") as handle:
+        original = sys.stdout, sys.stderr
+        sys.stdout = sys.stderr = handle
+        try:
+            ship.run()
+        except Exception as exc:  # noqa: BLE001 - a hook must never crash loudly
+            handle.write(f"ship failed: {exc}\n")
+        finally:
+            sys.stdout, sys.stderr = original
+    config.secure_file(log)

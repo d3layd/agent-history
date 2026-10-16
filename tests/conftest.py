@@ -6,7 +6,6 @@ the suite never touches a real index and never needs Ollama running.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -28,6 +27,20 @@ _LEAKY = [
     "AGENT_HISTORY_INJECT_MAX_DIST",
     "AGENT_HISTORY_REDACT",
     "AGENT_HISTORY_STRICT",
+    "AGENT_HISTORY_MACHINE",
+    "AGENT_HISTORY_HUB",
+    "AGENT_HISTORY_HUB_INGEST",
+    "AGENT_HISTORY_HUB_KEY",
+    "AGENT_HISTORY_INBOX",
+    "AGENT_HISTORY_TENANTS",
+    "AGENT_HISTORY_REMOTE",
+    "AGENT_HISTORY_REMOTE_KEY",
+    "AGENT_HISTORY_MCP_TOKENS",
+    "AGENT_HISTORY_MCP_TOKEN",
+    "AGENT_HISTORY_MCP_READ_TOKEN",
+    "AGENT_HISTORY_MCP_WRITE_TOKEN",
+    "AGENT_HISTORY_MCP_TENANT",
+    "AGENT_HISTORY_MCP_MACHINE",
     "CLAUDE_HISTORY_HOME",
     "CLAUDE_HISTORY_PROJECTS",
     "CLAUDE_HISTORY_EXTRA_DIRS",
@@ -53,6 +66,7 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_HISTORY_OPENCLAW_DIRS", str(tmp_path / "openclaw"))
     # WSL detection reads a real absolute path; keep it out of unit tests.
     monkeypatch.setenv("AGENT_HISTORY_NO_WSL", "1")
+    monkeypatch.setenv("AGENT_HISTORY_MACHINE", "testbox")
     (tmp_path / "projects").mkdir()
     return tmp_path
 
