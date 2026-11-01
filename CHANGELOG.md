@@ -35,6 +35,12 @@ they have no corresponding tags.
   uuid>)` resolves to the job on an upgraded hub; `history_recall` and
   `history_show` results list `claude_session_ids`. The seal lists every
   session (`Sessions:`) and uuid (`Claude sessions:`).
+- **`agent-history boat-export --job <job_id> <vm_id>...`**: pulls each Boat
+  VM's `~/.claude/projects` into the job directory (`vms/<vm_id>/`), verifies
+  the copy against the VM's sha256 list, leaves the VM stopped, and ships it
+  with `ship-jobs --final`; exit 0 only when the hub confirmed it. Never
+  deletes a VM. `--check` re-confirms from the receipt. VM transcripts read
+  back as `<job_id>/vm/<vm_id>`.
 
 ## [0.17.0] — 2026-10-15
 

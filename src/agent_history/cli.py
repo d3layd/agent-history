@@ -12,6 +12,7 @@ from . import (__version__, adapters, config, embed, index, inject, scrub,
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
             "purge", "strict", "scrub", "ship", "ship-jobs", "confirm-indexed",
+            "boat-export",
             "serve-ssh", "mcp", "import"}
 
 
@@ -109,6 +110,22 @@ def _build_parser() -> argparse.ArgumentParser:
     cix.add_argument("--tenant", help="hub tenant to read (a key that reads several)")
     cix.add_argument("--local", action="store_true",
                      help="read this machine's index instead (on the hub itself)")
+
+    bxp = sub.add_parser(
+        "boat-export", help="pull Boat VMs' Claude Code transcripts into a job "
+                            "and ship them; exit 0 = safe to delete the VMs")
+    bxp.add_argument("--job", required=True, metavar="JOB_ID",
+                     help="the claude -p job the VMs belong to")
+    bxp.add_argument("vms", nargs="+", metavar="VM_ID", help="Boat sandbox ids")
+    bxp.add_argument("--check", action="store_true",
+                     help="re-confirm earlier exports from their receipts "
+                          "without calling Boat")
+    bxp.add_argument("--allow-empty", action="store_true", dest="allow_empty",
+                     help="accept a VM with no transcripts")
+    bxp.add_argument("--wait", type=int, default=300, metavar="SECONDS",
+                     help="how long the final ship waits for the ship lock")
+    bxp.add_argument("--boat-timeout", type=int, default=180, metavar="SECONDS",
+                     help="timeout for each Boat API call (default 180)")
 
     ssh = sub.add_parser(
         "serve-ssh",
@@ -554,6 +571,13 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             from . import confirm
             return confirm.run(args.job, as_json=args.as_json, receipt=args.receipt,
                                tenant=args.tenant, local=args.local)
+        if args.command == "boat-export":
+            from . import boat_export
+            if args.check:
+                return boat_export.check(args.job, args.vms)
+            return boat_export.run(args.job, args.vms, allow_empty=args.allow_empty,
+                                   wait=args.wait,
+                                   boat=boat_export.Boat(timeout=args.boat_timeout))
         if args.command == "serve-ssh":
             from . import serve_ssh
             return serve_ssh.run(args.tenants)

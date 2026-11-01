@@ -106,6 +106,16 @@ sudo -iu ahub uv tool install --force "agent-history[mcp] @ git+https://github.c
 sudo systemctl restart agent-history-mcp
 ```
 
+## Boat VMs (piece B)
+
+Nothing to install: `boat-export` ships through the same key and env. The
+fleet job's teardown runs, as claude-jobs on fleet-1 (where its Boat
+credential lives):
+
+```bash
+agent-history boat-export --job "$JOB" "$VM" && boat delete "$VM"
+```
+
 ## Verify
 
 ```bash
