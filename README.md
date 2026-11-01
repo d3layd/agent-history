@@ -578,6 +578,35 @@ templated systemd units for the hub's indexer (`agent-history-hub-index@<tenant>
 (`agent-history-mcp.service`), a user unit and timer for shipping, and
 `authorized_keys.example`.
 
+### Session notes
+
+Next to raw transcripts, agent-history keeps **session notes**: short
+summaries that point back to their source, in a separate store (`notes.db`,
+never the transcript index). Each note names exactly one source: a claude.ai
+conversation URL, a Duet channel id plus the message id that starts the
+span, or a Claude Code session id plus machine (plus the job id for
+`claude -p`). A note without one is refused. Notes are append-only (a
+correction is a new note with `corrects`), redacted like transcripts, and
+searchable on their own:
+
+```text
+agent-history notes add --title … --summary … --session <id> [--job cj_…]
+agent-history notes sweep                              # sessions idle >= 5 min (model summary)
+agent-history notes scrub <note_id> --pattern - --reason "…"  # admin: remove a leaked secret
+agent-history notes search "what was decided"
+history_note(...)                                      # MCP, write scope
+history_recall(query, notes="only" | "include")        # default "exclude"
+```
+
+The sweep's summary comes from `claude -p --model haiku` with the machine's
+own Claude login (never `ANTHROPIC_API_KEY`), on redacted text; if that call
+fails the note falls back to first prompt + last message and is marked
+`fallback`. Each note carries the `history_show` call that opens its source
+span. On a
+hub, notes arrive in `inbox/<tenant>/<machine>/notes/` and are indexed by
+the same unit. Install: [`deploy/notes/`](deploy/notes/README.md); design:
+[`docs/design/session-notes.md`](docs/design/session-notes.md).
+
 ### MCP server: claude.ai and other MCP clients
 
 `agent-history mcp` serves the hub's history as MCP tools, so Claude on

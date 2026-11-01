@@ -126,14 +126,16 @@ def test_tool_listing_follows_the_token_scope(hub):
     read = run_calls(hub["tokens"]["read"], names)
     write = run_calls(hub["tokens"]["write"], names)
     assert set(read) == {"history_recall", "history_show"}
-    assert set(write) == {"history_record"}
+    assert set(write) == {"history_record", "history_note"}
     assert read["history_recall"].annotations.read_only_hint is True
     assert write["history_record"].annotations.read_only_hint is False
     assert write["history_record"].annotations.destructive_hint is False
     schema = read["history_recall"].input_schema
     assert schema["required"] == ["query"]
     assert set(schema["properties"]) == {"query", "k", "agent", "surface", "cwd",
-                                         "machine", "mode", "sort"}
+                                         "machine", "mode", "sort", "notes"}
+    assert schema["properties"]["notes"]["default"] == "exclude"
+    assert write["history_note"].annotations.destructive_hint is False
 
 
 def test_no_tool_can_change_or_delete_history(hub):
@@ -143,7 +145,7 @@ def test_no_tool_can_change_or_delete_history(hub):
         return {t.name for t in (await client.list_tools()).tools}
 
     assert run_calls(combined, names) == {"history_recall", "history_show",
-                                          "history_record"}
+                                          "history_record", "history_note"}
 
 
 def test_modern_protocol_clients_work_too(hub):

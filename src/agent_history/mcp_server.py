@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config, embed, redact, search, show, store
+from . import notes as notes_store
 from .mcp_auth import Identity, RateLimiter, TokenStore, bearer
 
 SURFACE = "claude-ai-chat"
@@ -57,7 +58,8 @@ MAX_URL = 500
 MAX_PROJECT = 200
 
 TOOL_SCOPE = {"history_recall": "read", "history_show": "read",
-              "history_record": "write"}
+              "history_record": "write", "history_note": "write"}
+NOTES_OPTIONS = ("exclude", "include", "only")
 
 _CHAT_URL = re.compile(
     r"^https://claude\.ai/(?:chat|project/[0-9a-f-]+/chat)/([0-9a-f]{8}-[0-9a-f]{4}-"
@@ -125,8 +127,11 @@ def _require(identity: Identity | None, scope: str) -> Identity:
 def recall(identity: Identity | None, query: str, *, k: int = DEFAULT_K,
            agent: str | None = None, surface: str | None = None,
            cwd: str | None = None, machine: str | None = None,
-           mode: str = "hybrid", sort: str = "relevance") -> dict:
+           mode: str = "hybrid", sort: str = "relevance",
+           notes: str = "exclude") -> dict:
     identity = _require(identity, "read")
+    if notes not in NOTES_OPTIONS:
+        raise ToolFailure(f"notes must be one of {', '.join(NOTES_OPTIONS)}")
     query = (query or "").strip()
     if not query:
         raise ToolFailure("query is empty")
@@ -140,8 +145,15 @@ def recall(identity: Identity | None, query: str, *, k: int = DEFAULT_K,
         raise ToolFailure("agent and surface name the same field; pass one")
     k = max(1, min(int(k), MAX_K))
 
+    note_hits: list[dict] = []
     with _tenant_index(identity.tenant):
-        if not config.db_path().exists():
+        if notes != "exclude":
+            try:
+                note_hits = notes_store.search(query, k=k, mode=mode)
+            except embed.EmbedError as exc:
+                raise ToolFailure(f"embedding unavailable ({exc}); "
+                                  "retry with mode='text'") from None
+        if notes == "only" or not config.db_path().exists():
             rows: list[dict] = []
         else:
             try:
@@ -169,8 +181,17 @@ def recall(identity: Identity | None, query: str, *, k: int = DEFAULT_K,
             "distance": row.get("distance"),
             "excerpt": _clip(row.get("text") or "", EXCERPT_CHARS),
         })
-    return {"query": query, "mode": mode, "count": len(results),
-            "results": results}
+    if notes == "exclude":
+        return {"query": query, "mode": mode, "count": len(results),
+                "results": results}
+    # Notes first (a note is a pointer to read), then transcript hits.
+    for hit in results:
+        hit["type"] = "transcript"
+    merged = []
+    for rank, hit in enumerate(note_hits + results, 1):
+        merged.append({**hit, "rank": rank})
+    return {"query": query, "mode": mode, "notes": notes, "count": len(merged),
+            "results": merged}
 
 
 def show_session(identity: Identity | None, session: str, *,
@@ -338,6 +359,46 @@ def record(identity: Identity | None, *, title: str, summary: str,
         "machine": identity.machine,
         "status": "queued: indexed on the hub's next run (about a minute)",
         "redacted": dict(Counter(found)),
+    }
+
+
+def note(identity: Identity | None, *, title: str, summary: str,
+         decisions: list[str] | None = None, findings: list[str] | None = None,
+         links: list[str] | None = None, chat_url: str | None = None,
+         duet_channel_id: str | None = None, duet_message_id: str | None = None,
+         session_id: str | None = None, session_machine: str | None = None,
+         job_id: str | None = None, span_start: str | None = None,
+         span_end: str | None = None, corrects: str | None = None) -> dict:
+    """Append a session note. It goes to the tenant's notes inbox (never the
+    transcript inbox) and is indexed into notes.db, apart from transcripts."""
+    identity = _require(identity, "write")
+    counter: Counter = Counter()
+    try:
+        source = notes_store.make_source(
+            chat_url=chat_url, duet_channel_id=duet_channel_id,
+            duet_message_id=duet_message_id, session_id=session_id,
+            machine=session_machine, job_id=job_id)
+        written = notes_store.build(
+            title=title, summary=summary, source=source, decisions=decisions,
+            findings=findings, links=links, span_start=span_start,
+            span_end=span_end, corrects=corrects, author=f"mcp:{identity.name}",
+            counter=counter)
+    except notes_store.NoteError as exc:
+        raise ToolFailure(str(exc)) from None
+    directory = _inbox_dir(identity) / notes_store.NOTES_DIR
+    if directory.is_symlink():
+        raise ToolFailure("refusing a symlinked notes directory")
+    try:
+        notes_store.write_file(directory, written)
+    except notes_store.NoteError as exc:
+        raise ToolFailure(str(exc)) from None
+    return {
+        "note_id": written["note_id"],
+        "created_at": written["created_at"],
+        "source": written["source"],
+        "show": notes_store.show_target(written["source"], written["span"]),
+        "status": "queued: indexed into the notes store on the hub's next run",
+        "redacted": dict(counter),
     }
 
 
