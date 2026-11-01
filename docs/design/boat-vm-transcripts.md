@@ -69,9 +69,15 @@ and its result comes back as a file in the job directory:
 
 `boat-export` and `boat-export --check` treat a VM as indexed only when that
 file names this job, says `"state": "indexed"`, lists the VM's session
-`<job_id>/vm/<vm_id>` in `sessions`, and was checked after the VM's export
-(`checked_at` >= the receipt's `exported_at`, so a confirmation from before
-a re-export does not count). `--index-receipt FILE` points elsewhere.
+`<job_id>/vm/<vm_id>` in `sessions`, and lists the digest of **this exact
+copy** in `vm_copies`. Each VM header record carries `Copy: sha256 <digest of
+the pulled files>`; `confirm-indexed` reports the digests of the VM headers
+the hub has indexed, and the export receipt records its own. A confirmation
+from before a re-export names the old copy, so it does not count. Content,
+not clocks: the first live run showed WSL's clock stepping back two seconds
+between the job's receipt and the runner's check, and on the fleet the two
+files are written by different users at different times.
+`--index-receipt FILE` points elsewhere.
 
 Flow on the fleet:
 
