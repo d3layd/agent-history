@@ -723,7 +723,9 @@ def last_message(span: dict) -> dict:
 def _summarize(command: str, span: dict) -> dict:
     if command == "last-message":
         return last_message(span)
-    done = subprocess.run(shlex.split(command), input=json.dumps(span), text=True,
+    # Windows parses a command line itself; POSIX shlex would eat backslashes.
+    argv = command if config.WINDOWS else shlex.split(command)
+    done = subprocess.run(argv, input=json.dumps(span), text=True,
                           capture_output=True, timeout=SUMMARIZER_TIMEOUT)
     if done.returncode != 0:
         raise NoteError(f"summarizer exited {done.returncode}: "

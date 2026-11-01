@@ -174,6 +174,7 @@ def test_the_transcript_reader_never_sees_notes(hub_inbox, fake_embed, monkeypat
     assert list(InboxAdapter().records()) == []
 
 
+@needs_ext
 def test_a_down_embedder_keeps_the_notes_batch(hub_inbox, fake_embed, monkeypatch):
     drop(hub_inbox, "claude-jobs", notes.build(title="t", summary="wait for ollama",
                                                source=code_source()))
@@ -208,8 +209,12 @@ def test_trigger_on_the_hub_indexes_notes(hub_inbox, fake_embed, monkeypatch):
     assert trigger._anything_changed(config.stamp_path())
     trigger.run("hub-test", if_changed=True, foreground=True)
     assert notes.search("indexed by the unit", mode="text")
-    assert not config.db_path().exists() or not store.existing_hashes(
-        store.open_for_read(check_model=False))
+    if config.db_path().exists():  # plain sqlite: no extension needed to count
+        db = sqlite3.connect(config.db_path())
+        try:
+            assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+        finally:
+            db.close()
 
 
 # ------------------------------------------------------------ hub shipping
