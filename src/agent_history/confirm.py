@@ -180,7 +180,10 @@ def _write_receipt(path: str, result: dict) -> None:
 
 
 def run(job_id: str, *, as_json: bool = False, receipt: str | None = None,
-        tenant: str | None = None, reader=None) -> int:
+        tenant: str | None = None, local: bool = False, reader=None) -> int:
+    """``local`` reads this machine's index (on the hub itself). Without it
+    a hub must be configured: Clamps has a local index of its own, and
+    reading that by mistake would report "not yet" forever."""
     def fail(code: int, state: str, why: str) -> int:
         result = {"job_id": job_id, "state": state, "error": why}
         if as_json:
@@ -198,11 +201,15 @@ def run(job_id: str, *, as_json: bool = False, receipt: str | None = None,
         return fail(EXIT_CONFIG, "error",
                     f"refusing to run as {user}: that user stays upload-only")
     try:
-        reader = reader or (RemoteReader(tenant) if config.remote_url() else LocalReader())
-        if isinstance(reader, LocalReader) and not config.db_path().exists() \
-                and not config.hub_mode() and tenant is None:
-            raise ConfigError("no hub configured (AGENT_HISTORY_REMOTE) and no "
-                              "local index to read")
+        if reader is None:
+            if local:
+                reader = LocalReader()
+            elif config.remote_url():
+                reader = RemoteReader(tenant)
+            else:
+                raise ConfigError("no hub configured: set AGENT_HISTORY_REMOTE (and "
+                                  "AGENT_HISTORY_REMOTE_KEY) to the read-only hub key, "
+                                  "or pass --local on the hub itself")
         result = check(job_id, reader)
     except ConfigError as exc:
         return fail(EXIT_CONFIG, "error", str(exc))

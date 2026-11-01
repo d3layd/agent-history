@@ -610,7 +610,7 @@ side and never as the job user, with
 `agent-history confirm-indexed --job <job_id> [--json] [--receipt FILE]`
 (0 indexed, 1 not yet or partial, 2 config or credential error). It reads
 the hub through the existing read-only `serve-ssh` key
-(`AGENT_HISTORY_REMOTE`), or the local index when none is set. Install steps: [`deploy/claude-jobs/`](deploy/claude-jobs/README.md);
+(`AGENT_HISTORY_REMOTE`), or with `--local` the local index on the hub itself. Install steps: [`deploy/claude-jobs/`](deploy/claude-jobs/README.md);
 design: [`docs/design/claude-jobs-shipper.md`](docs/design/claude-jobs-shipper.md).
 
 ### MCP server: claude.ai and other MCP clients

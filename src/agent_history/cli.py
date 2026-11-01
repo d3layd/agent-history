@@ -107,6 +107,8 @@ def _build_parser() -> argparse.ArgumentParser:
     cix.add_argument("--receipt", metavar="FILE",
                      help="also write the result JSON to FILE (atomically)")
     cix.add_argument("--tenant", help="hub tenant to read (a key that reads several)")
+    cix.add_argument("--local", action="store_true",
+                     help="read this machine's index instead (on the hub itself)")
 
     ssh = sub.add_parser(
         "serve-ssh",
@@ -551,7 +553,7 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if args.command == "confirm-indexed":
             from . import confirm
             return confirm.run(args.job, as_json=args.as_json, receipt=args.receipt,
-                               tenant=args.tenant)
+                               tenant=args.tenant, local=args.local)
         if args.command == "serve-ssh":
             from . import serve_ssh
             return serve_ssh.run(args.tenants)

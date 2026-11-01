@@ -211,8 +211,10 @@ it. Why this one:
   but Clamps already holds full read access through this key, so a narrower
   key would protect nothing.
 
-With no `AGENT_HISTORY_REMOTE`, `confirm-indexed` reads the local index
-(used on the hub itself as `ahub`, and by the tests).
+With `--local` it reads this machine's index instead (on the hub itself as
+`ahub`, and in tests). Without `--local` and without `AGENT_HISTORY_REMOTE`
+it exits 2: Clamps has a local index of its own, and silently reading that
+would report "not yet" until the 15 minutes run out.
 
 **What it checks**, all by job id:
 

@@ -27,7 +27,8 @@ they have no corresponding tags.
   `ship-final`. Exit 0 when the job's header, seal and every session it lists
   are findable by job id (the same search and show the MCP tools use); 1 not
   yet or partial; 2 config or credential error. Reads the hub over the
-  existing read-only `serve-ssh` key, refuses to run as `claude-jobs`, and can
+  existing read-only `serve-ssh` key (or `--local` on the hub), refuses to run
+  as `claude-jobs`, and can
   write its JSON result to a receipt file.
 - Job records carry `claude_session_id` (header and seal: `claude_session_ids`)
   and a new `claude` alias kind, so `history_show(session=<Claude session

@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(
 
 def confirm_local(*args, **kw):
     with config.tenant_home("dennis"):
-        return confirm.run(JOB, *args, **kw)
+        return confirm.run(JOB, *args, local=True, **kw)
 
 
 @pytest.fixture
@@ -133,8 +133,15 @@ def test_an_unreachable_hub_is_not_yet(hub, monkeypatch):  # noqa: F811
     assert confirm.run(JOB) == confirm.EXIT_PENDING
 
 
-def test_no_read_path_at_all_is_a_config_error(capsys):
-    assert confirm.run(JOB) == confirm.EXIT_CONFIG
+def test_no_read_path_at_all_is_a_config_error(hub, capsys):  # noqa: F811
+    """Even with a local index around (Clamps has one), no remote and no
+    --local is a config error, not an endless "not yet"."""
+    make_job(hub["jobs"], hub["projects"])
+    jobs.run(JOB)
+    deliver_and_index(hub)
+    capsys.readouterr()
+    with config.tenant_home("dennis"):
+        assert confirm.run(JOB) == confirm.EXIT_CONFIG
     assert "no hub configured" in capsys.readouterr().err
 
 
