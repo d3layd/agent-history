@@ -212,7 +212,8 @@ def test_trigger_on_the_hub_indexes_notes(hub_inbox, fake_embed, monkeypatch):
     if config.db_path().exists():  # plain sqlite: no extension needed to count
         db = sqlite3.connect(config.db_path())
         try:
-            assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+            has_chunks = db.execute("SELECT 1 FROM sqlite_master WHERE name = 'chunks'").fetchone()
+            assert not has_chunks or db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
         finally:
             db.close()
 

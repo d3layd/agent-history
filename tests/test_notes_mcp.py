@@ -10,8 +10,14 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from agent_history import config, notes  # noqa: E402
+from agent_history import config, notes, store  # noqa: E402
 from test_mcp import GH, data, hub, run_calls, text_of  # noqa: E402,F401
+
+# The shared hub fixture builds transcript indexes, which need sqlite-vec.
+pytestmark = pytest.mark.skipif(
+    not store.extensions_supported(),
+    reason="this Python cannot load SQLite extensions",
+)
 
 URL = "https://claude.ai/chat/0f6a7c2e-1234-4abc-8def-0123456789ab"
 JOB = "cj_20261101T120000Z_a1b2c3"
