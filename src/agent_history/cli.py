@@ -112,8 +112,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="read this machine's index instead (on the hub itself)")
 
     bxp = sub.add_parser(
-        "boat-export", help="pull Boat VMs' Claude Code transcripts into a job "
-                            "and ship them; exit 0 = safe to delete the VMs")
+        "boat-export", help="pull Boat VMs' Claude Code transcripts into a job and "
+                            "ship them; 0 safe to delete (arrived and indexed), "
+                            "4 arrived, awaiting index confirmation")
     bxp.add_argument("--job", required=True, metavar="JOB_ID",
                      help="the claude -p job the VMs belong to")
     bxp.add_argument("vms", nargs="+", metavar="VM_ID", help="Boat sandbox ids")
@@ -126,6 +127,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="how long the final ship waits for the ship lock")
     bxp.add_argument("--boat-timeout", type=int, default=180, metavar="SECONDS",
                      help="timeout for each Boat API call (default 180)")
+    bxp.add_argument("--index-receipt", metavar="FILE", dest="index_receipt",
+                     help="the runner's confirm-indexed result (default: "
+                          "<jobs>/<job_id>/index-confirmed.json)")
 
     ssh = sub.add_parser(
         "serve-ssh",
@@ -573,10 +577,12 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                                tenant=args.tenant, local=args.local)
         if args.command == "boat-export":
             from . import boat_export
+            from pathlib import Path
+            receipt = Path(args.index_receipt) if args.index_receipt else None
             if args.check:
-                return boat_export.check(args.job, args.vms)
+                return boat_export.check(args.job, args.vms, index_receipt=receipt)
             return boat_export.run(args.job, args.vms, allow_empty=args.allow_empty,
-                                   wait=args.wait,
+                                   wait=args.wait, index_receipt=receipt,
                                    boat=boat_export.Boat(timeout=args.boat_timeout))
         if args.command == "serve-ssh":
             from . import serve_ssh

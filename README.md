@@ -621,8 +621,11 @@ until the work is verified, then runs
 a stopped VM, pulls `~/.claude/projects` with `boat scp`, checks the copy
 against the VM's own sha256 list, stops the VM again (also on failure), and
 ships the job with `ship-jobs --final`. Exit 0 means the hub confirmed every
-record and the VMs are safe to delete; the tool never deletes a VM itself
-(`boat-export … && boat delete …` is the caller's step). Each VM reads back as
+record arrived **and** the runner's `confirm-indexed` result
+(`<jobs>/<job_id>/index-confirmed.json`) says the VM's session is indexed, so
+the VM is safe to delete. Exit 4 means arrived, awaiting index confirmation.
+The tool never deletes a VM itself (`boat-export --check … && boat delete …`
+is the caller's step). Each VM reads back as
 its own conversation, `history_show(session="<job_id>/vm/<vm_id>")`.
 `--check` re-confirms an earlier export from its receipt without calling
 Boat. Design: [`docs/design/boat-vm-transcripts.md`](docs/design/boat-vm-transcripts.md).

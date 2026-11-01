@@ -352,13 +352,15 @@ def vm_records(job: Job, vm_id: str, files: list[Path]) -> list[tuple[Record, di
     records: list[Record] = []
     sids: list[str] = []
     real_cwd = ""
+    tagged: list[tuple[Record, dict]] = []
     for path in files:
         for record in _file_records(path):
             real_cwd = real_cwd or record.cwd
             if record.session_id and record.session_id not in sids:
                 sids.append(record.session_id)
-            records.append(dataclasses.replace(
-                record, session_id=session, cwd=job.cwd(record.cwd)))
+            moved = dataclasses.replace(record, session_id=session, cwd=job.cwd(record.cwd))
+            records.append(moved)
+            tagged.append(_with_claude(extra, moved, record.session_id))
     if not records:
         return []
     stamps = [r.timestamp for r in records if r.timestamp]
@@ -375,7 +377,7 @@ def vm_records(job: Job, vm_id: str, files: list[Path]) -> list[tuple[Record, di
                     session_id=session, cwd=job.cwd(real_cwd),
                     timestamp=min(stamps) if stamps else _iso(job.started()),
                     role="job", text="\n".join(lines))
-    return [(header, extra)] + [(r, extra) for r in records]
+    return [_with_claude_list(extra, header, sids)] + tagged
 
 
 def record_digest(record: Record) -> str:

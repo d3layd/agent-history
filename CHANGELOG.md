@@ -38,9 +38,12 @@ they have no corresponding tags.
 - **`agent-history boat-export --job <job_id> <vm_id>...`**: pulls each Boat
   VM's `~/.claude/projects` into the job directory (`vms/<vm_id>/`), verifies
   the copy against the VM's sha256 list, leaves the VM stopped, and ships it
-  with `ship-jobs --final`; exit 0 only when the hub confirmed it. Never
-  deletes a VM. `--check` re-confirms from the receipt. VM transcripts read
-  back as `<job_id>/vm/<vm_id>`.
+  with `ship-jobs --final`. Exit 0 (safe to delete) only once arrival is
+  confirmed and the runner's `confirm-indexed` result in
+  `<jobs>/<job_id>/index-confirmed.json` covers the VM; exit 4 = arrived,
+  awaiting index confirmation. Never deletes a VM. `--check` re-confirms
+  without Boat. VM transcripts read back as `<job_id>/vm/<vm_id>` and carry
+  the VM's Claude session uuid.
 
 ## [0.17.0] — 2026-10-15
 

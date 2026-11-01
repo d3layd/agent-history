@@ -16,6 +16,7 @@ from agent_history import boat_export, cli, config, jobs, ship
 from jobfixtures import GH, JOB, landing_upload, make_job, session_line, shipped_lines
 
 VM = "bx_u6qgdzjq"
+WAIT = boat_export.EXIT_AWAITING_INDEX
 VM2 = "bx_second01"
 VSID = "9a9a9a9a-0000-4000-8000-00000000bbbb"
 
@@ -103,6 +104,17 @@ def env(tmp_path, monkeypatch):
             "job": root / JOB}
 
 
+def confirm_index(env, *vms, state="indexed", checked_at=None):
+    """What the runner's side does after confirm-indexed --job JOB exits 0:
+    its --json result lands in the job directory."""
+    import datetime
+    stamp = checked_at or (datetime.datetime.now(datetime.timezone.utc)
+                           + datetime.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (env["job"] / "index-confirmed.json").write_text(json.dumps({
+        "job_id": JOB, "state": state, "checked_at": stamp,
+        "sessions": [JOB] + [f"{JOB}/vm/{vm}" for vm in vms]}))
+
+
 def vm_lines(env, vm=VM):
     return [l for l in shipped_lines(env["landing"])
             if l["session_id"] == f"{JOB}/vm/{vm}"]
@@ -111,9 +123,9 @@ def vm_lines(env, vm=VM):
 def test_a_stopped_vm_is_resumed_pulled_shipped_and_left_stopped(env, capsys):
     boat = env["boat"]
     boat.add(VM, "stopped", ROWS)
-    assert boat_export.run(JOB, [VM], boat=boat) == 0
+    assert boat_export.run(JOB, [VM], boat=boat) == WAIT
     out = capsys.readouterr().out
-    assert f"safe to delete: {VM}" in out
+    assert "awaiting index confirmation" in out and "safe to delete" not in out
     assert boat.states[VM] == "stopped"
     names = [c[0] for c in boat.calls]
     assert names.index("resume") < names.index("checksums") < names.index("pull")
@@ -126,7 +138,7 @@ def test_a_stopped_vm_is_resumed_pulled_shipped_and_left_stopped(env, capsys):
 
 def test_vm_records_are_their_own_conversation_tagged_with_the_job(env):
     env["boat"].add(VM, "running", ROWS)
-    assert boat_export.run(JOB, [VM], boat=env["boat"]) == 0
+    assert boat_export.run(JOB, [VM], boat=env["boat"]) == WAIT
     lines = vm_lines(env)
     assert len(lines) == 3
     for line in lines:
@@ -149,7 +161,7 @@ def test_vm_records_are_their_own_conversation_tagged_with_the_job(env):
 
 def test_a_running_vm_is_not_resumed_but_is_stopped(env):
     env["boat"].add(VM, "running", ROWS)
-    assert boat_export.run(JOB, [VM], boat=env["boat"]) == 0
+    assert boat_export.run(JOB, [VM], boat=env["boat"]) == WAIT
     assert ("resume", VM) not in env["boat"].calls
     assert env["boat"].states[VM] == "stopped"
 
@@ -187,7 +199,7 @@ def test_a_vm_that_cannot_be_confirmed_stopped_is_not_safe(env, capsys):
 def test_an_empty_vm_is_refused_unless_allowed(env):
     env["boat"].add(VM, "stopped")
     assert boat_export.run(JOB, [VM], boat=env["boat"]) == jobs.EXIT_UNCONFIRMED
-    assert boat_export.run(JOB, [VM], boat=env["boat"], allow_empty=True) == 0
+    assert boat_export.run(JOB, [VM], boat=env["boat"], allow_empty=True) == WAIT
 
 
 def test_hub_failure_means_nothing_is_safe_and_a_retry_recovers(env, monkeypatch, capsys):
@@ -200,7 +212,7 @@ def test_hub_failure_means_nothing_is_safe_and_a_retry_recovers(env, monkeypatch
     assert not (env["job"] / "vms" / VM / "EXPORTED.json").exists()
     assert (env["job"] / "vms" / VM / "projects").is_dir()   # kept for the retry
     monkeypatch.setattr(ship, "upload", landing_upload(env["landing"]))
-    assert boat_export.run(JOB, [VM], boat=boat) == 0
+    assert boat_export.run(JOB, [VM], boat=boat) == WAIT
 
 
 def test_one_bad_vm_does_not_block_the_good_one(env, capsys):
@@ -209,7 +221,7 @@ def test_one_bad_vm_does_not_block_the_good_one(env, capsys):
     boat.add(VM2, "error", ROWS)
     assert boat_export.run(JOB, [VM, VM2], boat=boat) == jobs.EXIT_UNCONFIRMED
     captured = capsys.readouterr()
-    assert f"safe to delete: {VM}" in captured.out
+    assert f"left stopped: {VM}" in captured.out
     assert f"NOT safe to delete (left stopped): {VM2}" in captured.err
     assert (env["job"] / "vms" / VM / "EXPORTED.json").exists()
     assert not (env["job"] / "vms" / VM2).exists()
@@ -225,7 +237,9 @@ def test_boat_export_never_deletes_a_vm(env):
 
 def test_check_reconfirms_a_receipt_without_boat(env, capsys):
     env["boat"].add(VM, "stopped", ROWS)
-    assert boat_export.run(JOB, [VM], boat=env["boat"]) == 0
+    assert boat_export.run(JOB, [VM], boat=env["boat"]) == WAIT
+    assert boat_export.check(JOB, [VM]) == WAIT        # arrived, not indexed yet
+    confirm_index(env, VM)
     assert boat_export.check(JOB, [VM]) == 0
     assert "safe to delete" in capsys.readouterr().out
     copy = next((env["job"] / "vms" / VM / "projects").rglob("*.jsonl"))
@@ -237,14 +251,14 @@ def test_check_reconfirms_a_receipt_without_boat(env, capsys):
 def test_a_reexport_replaces_the_copy_and_ships_only_new_records(env):
     boat = env["boat"]
     home = boat.add(VM, "stopped", ROWS)
-    assert boat_export.run(JOB, [VM], boat=boat) == 0
+    assert boat_export.run(JOB, [VM], boat=boat) == WAIT
     first = len(vm_lines(env))
     f = next((home / ".claude" / "projects").rglob("*.jsonl"))
     with f.open("a") as fh:
         fh.write(json.dumps(session_line("assistant", "A follow-up after the VM resumed.",
                                          "2026-11-01T23:30:00.000Z", sid=VSID,
                                          cwd="/home/user/storm-check")) + "\n")
-    assert boat_export.run(JOB, [VM], boat=boat) == 0
+    assert boat_export.run(JOB, [VM], boat=boat) == WAIT
     lines = vm_lines(env)
     assert len(lines) == first + 1   # only the new message; the VM header is unchanged
     assert "A follow-up after the VM resumed." in json.dumps(lines)
@@ -266,8 +280,38 @@ def test_no_hub_configured_touches_nothing(env, monkeypatch):
 
 def test_cli_check_path(env, capsys):
     env["boat"].add(VM, "stopped", ROWS)
-    assert boat_export.run(JOB, [VM], boat=env["boat"]) == 0
+    assert boat_export.run(JOB, [VM], boat=env["boat"]) == WAIT
+    assert cli.main(["boat-export", "--job", JOB, "--check", VM]) == WAIT
+    confirm_index(env, VM)
     assert cli.main(["boat-export", "--job", JOB, "--check", VM]) == 0
+
+
+@pytest.mark.parametrize("bad", [
+    {"state": "partial"},
+    {"checked_at": "2000-01-01T00:00:00Z"},     # checked before the export
+    {"vms": ()},                                 # does not list this VM
+])
+def test_an_index_confirmation_that_does_not_cover_the_vm_is_not_enough(env, bad):
+    env["boat"].add(VM, "stopped", ROWS)
+    assert boat_export.run(JOB, [VM], boat=env["boat"]) == WAIT
+    vms = bad.pop("vms", (VM,))
+    confirm_index(env, *vms, **bad)
+    assert boat_export.check(JOB, [VM]) == WAIT
+
+
+def test_a_confirmation_from_before_a_reexport_does_not_count(env):
+    env["boat"].add(VM, "stopped", ROWS)
+    assert boat_export.run(JOB, [VM], boat=env["boat"]) == WAIT
+    confirm_index(env, VM, checked_at="2026-01-01T00:00:00Z")
+    assert boat_export.check(JOB, [VM]) == WAIT
+
+
+def test_vm_records_carry_the_vm_claude_session_uuid(env):
+    env["boat"].add(VM, "stopped", ROWS)
+    boat_export.run(JOB, [VM], boat=env["boat"])
+    for line in vm_lines(env):
+        assert line["claude_session_id"] == VSID
+        assert ["claude", VSID] in line["aliases"]
 
 
 # ------------------------------------------------- the real CLI wrapper

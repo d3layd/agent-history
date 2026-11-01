@@ -113,7 +113,9 @@ fleet job's teardown runs, as claude-jobs on fleet-1 (where its Boat
 credential lives):
 
 ```bash
-agent-history boat-export --job "$JOB" "$VM" && boat delete "$VM"
+agent-history boat-export --job "$JOB" "$VM"      # 4 = arrived, awaiting index confirmation
+# after the runner wrote <jobs>/$JOB/index-confirmed.json (confirm-indexed --json):
+agent-history boat-export --job "$JOB" --check "$VM" && boat delete "$VM"
 ```
 
 ## Verify

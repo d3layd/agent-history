@@ -9,9 +9,15 @@ For each VM: resume it if it is stopped, list the sha256 of every
 ``~/.claude/projects/**.jsonl`` on it, pull that tree with ``boat scp`` into
 ``<jobs>/<job_id>/vms/<vm_id>/projects/``, check the copy against the list,
 and stop the VM again (always, also on failure). Then the job is shipped with
-``ship-jobs --final``, and exit 0 means the hub confirmed every record. Only
-then is a receipt written and the VM reported safe to delete. Nothing here
-ever deletes a VM, and the VM needs nothing installed.
+``ship-jobs --final``; once the hub confirmed arrival a receipt is written.
+
+A VM is reported **safe to delete** only when, on top of that, indexing is
+confirmed: ``confirm-indexed --job <job_id>`` (run on the runner's side,
+never as claude-jobs) wrote its result to ``<jobs>/<job_id>/index-confirmed.json``
+saying the VM's session is indexed, checked after the export. Until then the
+exit is 4, "arrived, awaiting index confirmation", and ``--check`` can be
+polled without touching Boat. Nothing here ever deletes a VM, and the VM
+needs nothing installed.
 
 See docs/design/boat-vm-transcripts.md.
 """
@@ -35,6 +41,8 @@ RUNNING = frozenset({"running", "ready", "up", "started"})
 STOPPED = "stopped"
 TRANSIENT = frozenset({"stopping", "pending", "starting", "resuming", "cloning"})
 POLL_SECONDS = 3.0
+EXIT_AWAITING_INDEX = 4
+INDEX_RECEIPT = "index-confirmed.json"
 
 
 class BoatError(Exception):
@@ -231,6 +239,28 @@ def _swap_in(target: Path, pulled: Path) -> None:
     (target / "EXPORTED.json").unlink(missing_ok=True)  # stale until re-confirmed
 
 
+def index_problem(job: jobs.Job, vm: str, exported_at: str,
+                  receipt: Path | None = None) -> str:
+    """Why the runner's index confirmation does not (yet) cover ``vm``; ""
+    when it does. The confirmation is ``confirm-indexed --json`` output."""
+    path = receipt or job.path / INDEX_RECEIPT
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "indexing not confirmed yet"
+    except (OSError, ValueError):
+        return "the index confirmation is unreadable"
+    if not isinstance(data, dict) or data.get("job_id") != job.job_id:
+        return "the index confirmation names another job"
+    if data.get("state") != "indexed":
+        return f"indexing is {data.get('state') or 'unknown'}"
+    if job.vm_session(vm) not in (data.get("sessions") or []):
+        return "the index confirmation does not cover this VM yet"
+    if str(data.get("checked_at") or "") < exported_at:
+        return "the index confirmation predates this VM's export"
+    return ""
+
+
 def vm_digests(job: jobs.Job, vm: str) -> list[str]:
     files = jobs.vm_files(job.path / "vms" / vm)
     return [jobs.record_digest(r) for r, _ in jobs.vm_records(job, vm, files)]
@@ -251,7 +281,8 @@ def write_receipt(job: jobs.Job, vm: str, files: dict[str, str]) -> Path:
 
 
 def run(job_id: str, vms: list[str], *, allow_empty: bool = False,
-        wait: int = jobs.DEFAULT_WAIT, boat: Boat | None = None) -> int:
+        wait: int = jobs.DEFAULT_WAIT, boat: Boat | None = None,
+        index_receipt: Path | None = None) -> int:
     problem = _validate(job_id, vms)
     if problem:
         print(f"boat-export: {problem}", file=sys.stderr)
@@ -280,26 +311,36 @@ def run(job_id: str, vms: list[str], *, allow_empty: bool = False,
               f"{code}); the VMs stay stopped, nothing is safe to delete",
               file=sys.stderr)
         return code
+    safe, waiting = [], []
     for result in pulled:
-        write_receipt(job, result.vm, result.files)
-    print("boat-export: safe to delete: " + " ".join(r.vm for r in pulled))
+        receipt = write_receipt(job, result.vm, result.files)
+        exported = json.loads(receipt.read_text(encoding="utf-8"))["exported_at"]
+        (waiting if index_problem(job, result.vm, exported, index_receipt) else safe).append(result.vm)
+    if safe:
+        print("boat-export: safe to delete: " + " ".join(safe))
+    if waiting:
+        print("boat-export: arrived; awaiting index confirmation (confirm-indexed "
+              f"--job {job_id} on the runner's side), left stopped: " + " ".join(waiting))
     failed = [r.vm for r in results if not r.ok]
     if failed:
         print("boat-export: NOT safe to delete (left stopped): " + " ".join(failed),
               file=sys.stderr)
         return jobs.EXIT_UNCONFIRMED
-    return jobs.EXIT_OK
+    return EXIT_AWAITING_INDEX if waiting else jobs.EXIT_OK
 
 
-def check(job_id: str, vms: list[str]) -> int:
-    """Re-confirm receipts without Boat: files unchanged, records shipped."""
+def check(job_id: str, vms: list[str], index_receipt: Path | None = None) -> int:
+    """Re-confirm without Boat: files unchanged, records shipped, and the
+    runner's index confirmation covers the VM. 0 safe to delete, 4 arrived
+    but indexing not confirmed yet, 1 anything else."""
     problem = _validate(job_id, vms)
     if problem:
         print(f"boat-export: {problem}", file=sys.stderr)
         return jobs.EXIT_CONFIG
     job = jobs.load_job(config.jobs_dir() / job_id)
     state = ship.State.open(writable=False)
-    bad = []
+    bad: list[str] = []
+    waiting: list[str] = []
     try:
         for vm in vms:
             receipt = job.path / "vms" / vm / "EXPORTED.json"
@@ -318,12 +359,19 @@ def check(job_id: str, vms: list[str]) -> int:
             if unshipped:
                 bad.append(f"{vm}: {len(unshipped)} record(s) not confirmed shipped")
                 continue
-            print(f"boat-export: {vm}: confirmed on the hub; safe to delete")
+            problem = index_problem(job, vm, str(data.get("exported_at") or ""),
+                                    index_receipt)
+            if problem:
+                waiting.append(f"{vm}: arrived; {problem}")
+                continue
+            print(f"boat-export: {vm}: arrived and indexed on the hub; safe to delete")
     finally:
         state.close()
-    for line in bad:
+    for line in bad + waiting:
         print(f"boat-export: {line}", file=sys.stderr)
-    return jobs.EXIT_OK if not bad else jobs.EXIT_UNCONFIRMED
+    if bad:
+        return jobs.EXIT_UNCONFIRMED
+    return EXIT_AWAITING_INDEX if waiting else jobs.EXIT_OK
 
 
 def _validate(job_id: str, vms: list[str]) -> str:
