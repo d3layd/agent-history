@@ -25,7 +25,7 @@ changed by a note.
 | A resumed session gets a new note covering only what is new | Per session the sweep keeps the last timestamp a note covered; the next note's span starts after it. |
 | Each note links to its source; a note without a resolvable source is rejected | Exactly one of: claude.ai conversation URL; Duet channel id + message id; Claude Code session id + machine (+ job id for `claude -p`). Anything else is refused. |
 | `history_recall` can return notes first; each link opens the source span with `history_show` | `notes="include"` lists matching notes before transcript hits. Each note carries `show: {session, around}` for `history_show`. |
-| Append-only: never changed or deleted; a correction is a new note | No update or delete path; SQLite triggers abort `UPDATE`/`DELETE` on the table; files are written `O_EXCL`; `corrects: <note id>` links a correction. |
+| Append-only: never changed or deleted; a correction is a new note | No update or delete path; SQLite triggers abort `UPDATE`/`DELETE` on the table; files are written `O_EXCL`; `corrects: <note id>` links a correction. One admin-only exception, `notes scrub` (below), for a leaked secret. |
 
 ## Data flow
 
@@ -101,22 +101,75 @@ Both, through one validated path:
   (claude.ai, Duet) or `agent-history notes add` (Claude Code, `claude -p`).
   This writes the best note, because the agent knows what mattered.
 - **The sweep**, as the safety net, for sessions that ended or went idle
-  without one. It needs a summarizer: an external command that reads a JSON
-  span on stdin and prints `{title, summary, decisions?, findings?, links?}`.
-  The built-in `last-message` summarizer needs no model: the title is the
-  first prompt, the summary is the last assistant message. For a `claude -p`
-  job that last message is the job's own report. A model summarizer (for
-  example a `claude -p` call with a fixed prompt) is a setting; it costs
-  tokens, so it is off until configured.
+  without one.
 
 The hub does not summarize: it has only an embedding model.
+
+## The sweep's summarizer: a model summary (Dennis, Nov 1)
+
+Sessions wander, so the first prompt and the last message don't represent
+them. The default summarizer is a model:
+
+- `claude -p --model haiku --output-format json --max-turns 1
+  --no-session-persistence --tools ""` with a fixed instruction, the span as
+  JSON on stdin. It uses the machine's existing Claude login: on claude-jobs
+  that is the subscription token (`CLAUDE_CODE_OAUTH_TOKEN`). The child
+  process never sees `ANTHROPIC_API_KEY`: it is removed from the environment
+  before the call, so the production key can't be billed by accident.
+  `AGENT_HISTORY_NOTES_MODEL` and `AGENT_HISTORY_CLAUDE_BIN` override the
+  model and binary.
+- The transcript is redacted before it goes to the model, and the model's
+  output is redacted again when the note is built.
+- The summarizer's own call is not persisted (`--no-session-persistence`),
+  and its instruction starts with a marker the sweep skips, so a summary is
+  never itself summarized.
+- **Fallback:** if the model call fails (no `claude`, signed out, timeout,
+  bad JSON), the note is built from the first prompt and the last assistant
+  message and marked `fallback: true` (author `sweep:fallback`), with a line
+  in its text saying so. The state still advances: a fallback note is a
+  note, and the next span starts after it.
+- `AGENT_HISTORY_NOTES_SUMMARIZER` can name another command with the same
+  contract (JSON span on stdin, `{title, summary, decisions?, findings?,
+  links?}` on stdout); its failures fall back the same way.
+
+## Secrets in notes
+
+**Redaction gap closed.** `redact` now catches bare 1Password service-account
+tokens (`ops_` followed by 40+ token characters) and Scribe agent keys
+(`scrb_agt_` followed by 16+), with no `NAME=` in front. Short names such as
+the Linux user `ops_a0dc6f0c` are left alone. This applies to transcripts
+too, everywhere `redact` runs.
+
+**`notes scrub`: the one admin exception to append-only.**
+
+```
+agent-history notes scrub <note_id> --pattern <text | -> --reason "<why>"
+```
+
+Run on the hub, as the owner of the tenant's files (`ahub`); it is not an
+MCP tool. It replaces every occurrence of the leaked text in that note (its
+title, searchable text and stored JSON) with `[REDACTED:scrubbed]`, rebuilds
+the note's full-text entry and its embedding, rewrites the note's raw copy
+under `inbox/.processed/<machine>/notes/`, and appends an audit record: who
+(`$SUDO_USER` or the user), when, which note, the reason, how many
+replacements, which fields. **Never the secret**: not the pattern, not a
+hash of it (a short secret's hash can be brute-forced). `--pattern -` reads
+the text from stdin, so it stays out of `ps` and shell history.
+
+How the trigger still blocks everything else: the `UPDATE` trigger aborts
+unless the note's id is in a one-row `scrub_gate` table, which only `scrub`
+fills and empties inside its own transaction, and it aborts any change to a
+note's id, time, machine or source even then. `DELETE` is always refused.
+The audit table is append-only the same way. (Anyone with write access to
+the database file can drop triggers; they guard against code paths, not
+against the file's owner.)
 
 ## Failure modes
 
 | what fails | effect |
 |---|---|
 | source missing or malformed | the note is refused (CLI exit 2, MCP tool error, sweep skips and logs) |
-| summarizer fails, times out or prints bad JSON | no note for that session this round; state not advanced, so the next sweep retries |
+| summarizer fails, times out or prints bad JSON | a fallback note (first prompt + last message), marked `fallback: true` |
 | hub unreachable | notes stay in `notes-outbox/`, sent on the next sweep or `notes ship` |
 | Ollama down on the hub | the notes batch stays in the inbox, indexed on a later run |
 | the same note delivered twice | stored once (content hash is unique) |
