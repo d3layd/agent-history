@@ -11,7 +11,8 @@ from . import (__version__, adapters, config, embed, index, inject, scrub,
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub", "ship", "serve-ssh", "mcp", "import"}
+            "purge", "strict", "scrub", "ship", "serve-ssh", "mcp", "import",
+            "notes"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -84,6 +85,47 @@ def _build_parser() -> argparse.ArgumentParser:
                      dest="backfill",
                      help="also send chunks already in the local index "
                           "(covers transcripts no longer on disk)")
+
+    nts = sub.add_parser("notes", help="session notes: summaries kept apart "
+                                        "from transcripts, each linked to its source")
+    nts_sub = nts.add_subparsers(dest="notes_action", required=True)
+    nadd = nts_sub.add_parser("add", help="write one note (append-only)")
+    nadd.add_argument("--title", required=True)
+    nadd.add_argument("--summary", required=True)
+    nadd.add_argument("--decision", action="append", dest="decisions", default=[])
+    nadd.add_argument("--finding", action="append", dest="findings", default=[])
+    nadd.add_argument("--link", action="append", dest="links", default=[])
+    nadd.add_argument("--chat-url", dest="chat_url",
+                      help="source: a https://claude.ai/chat/<uuid> conversation")
+    nadd.add_argument("--duet-channel", dest="duet_channel",
+                      help="source: a Duet channel id (with --duet-message)")
+    nadd.add_argument("--duet-message", dest="duet_message",
+                      help="the Duet message id that starts the span")
+    nadd.add_argument("--session", dest="session_id",
+                      help="source: a Claude Code session id")
+    nadd.add_argument("--job", dest="job_id", help="with --session: the claude -p job id")
+    nadd.add_argument("--session-machine", dest="session_machine",
+                      help="with --session: the machine it ran on (default: this one)")
+    nadd.add_argument("--span-start", dest="span_start")
+    nadd.add_argument("--span-end", dest="span_end")
+    nadd.add_argument("--corrects", help="the note id this one corrects")
+    nsearch = nts_sub.add_parser("search", help="search notes only")
+    nsearch.add_argument("query", nargs="+")
+    nsearch.add_argument("-k", type=int, default=8)
+    nsearch.add_argument("--mode", choices=["hybrid", "text", "vector"], default="hybrid")
+    nsearch.add_argument("--json", action="store_true", dest="as_json")
+    nsweep = nts_sub.add_parser("sweep", help="note sessions that ended or went idle")
+    nsweep.add_argument("--idle-minutes", type=float, default=5.0, dest="idle_minutes")
+    nsweep.add_argument("--summarizer",
+                        help="command reading a JSON span on stdin, printing "
+                             "{title, summary, ...}; or last-message "
+                             "(default: $AGENT_HISTORY_NOTES_SUMMARIZER)")
+    nsweep.add_argument("--session", help="note this session now (session end)")
+    nsweep.add_argument("--dry-run", action="store_true", dest="dry_run")
+    nts_sub.add_parser("ship", help="upload queued notes to the hub")
+    nts_sub.add_parser("index", help="hub: index notes waiting in the inbox")
+    nts_sub.add_parser("hook", help="Claude Code SessionEnd hook: sweep that "
+                                    "session in the background")
 
     ssh = sub.add_parser(
         "serve-ssh",
@@ -464,6 +506,59 @@ def _cmd_doctor() -> int:
     return 0 if ok else 1
 
 
+def _cmd_notes(args: argparse.Namespace) -> int:
+    from . import notes
+
+    action = args.notes_action
+    if action == "add":
+        try:
+            source = notes.make_source(
+                chat_url=args.chat_url, duet_channel_id=args.duet_channel,
+                duet_message_id=args.duet_message, session_id=args.session_id,
+                machine=(args.session_machine or config.machine_id())
+                if (args.session_id or args.job_id) else None,
+                job_id=args.job_id)
+            note = notes.build(title=args.title, summary=args.summary, source=source,
+                               decisions=args.decisions, findings=args.findings,
+                               links=args.links, span_start=args.span_start,
+                               span_end=args.span_end, corrects=args.corrects)
+        except notes.NoteError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"{note['note_id']}: {notes.save(note)}")
+        return 0
+    if action == "search":
+        try:
+            hits = notes.search(" ".join(args.query), k=args.k, mode=args.mode)
+        except notes.NoteError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.as_json:
+            print(json.dumps(hits, ensure_ascii=False, indent=1))
+            return 0
+        if not hits:
+            print("no notes match")
+        for n, hit in enumerate(hits, 1):
+            show = hit["show"]
+            print(f"#{n}  {hit['created_at']}  {hit['note_id']}  @{hit['machine']}")
+            print(f"    {hit['title']}")
+            if show:
+                print(f"    show: {show['session']}"
+                      + (f" --around {show['around']}" if show.get("around") else ""))
+            print()
+        return 0
+    if action == "sweep":
+        return notes.sweep(idle_minutes=args.idle_minutes, summarizer=args.summarizer,
+                           session=args.session, dry_run=args.dry_run)
+    if action == "ship":
+        return notes.ship_outbox()
+    if action == "index":
+        return notes.index_inbox()
+    if action == "hook":
+        return notes.hook_session_end()
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     # Hooks and cron redirect stdout to a log file, which makes Python
     # block-buffer it. Without this, a long index writes nothing for minutes and
@@ -522,6 +617,8 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                             where=args.where, tenant=args.tenant)
         if args.command == "ship":
             return ship.run(dry_run=args.dry_run, backfill=args.backfill)
+        if args.command == "notes":
+            return _cmd_notes(args)
         if args.command == "serve-ssh":
             from . import serve_ssh
             return serve_ssh.run(args.tenants)

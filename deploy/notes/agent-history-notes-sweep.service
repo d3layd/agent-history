@@ -1,0 +1,20 @@
+# systemd USER unit: write session notes for Claude Code sessions (and
+# claude -p jobs) that went idle, and ship them with the user's hub settings.
+#   cp agent-history-notes-sweep.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now agent-history-notes-sweep.timer
+#
+# ~/.config/agent-history/env needs a summarizer, e.g.
+#   AGENT_HISTORY_NOTES_SUMMARIZER=last-message
+# (no model: first prompt as title, last assistant message as summary), or a
+# command that reads a JSON span on stdin and prints {title, summary, ...}.
+# A model summarizer costs tokens; it is off until you set one.
+[Unit]
+Description=agent-history: session notes for idle sessions
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/agent-history/env
+ExecStart=%h/.local/bin/agent-history notes sweep --idle-minutes 5
+# A failed summarizer is retried next round; not worth a red unit.
+SuccessExitStatus=1
+Nice=10

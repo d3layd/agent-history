@@ -9,6 +9,20 @@ Versions before 0.4.1 were released during initial development and are recorded
 here for context; the repository history was squashed before publication, so
 they have no corresponding tags.
 
+## [Unreleased]
+
+### Added
+- **Session notes**, kept apart from transcripts in `notes.db`: `agent-history
+  notes add | search | sweep | ship | index | hook`, the MCP tool
+  `history_note`, and `history_recall(notes="exclude" | "include" | "only")`
+  (default `exclude`, so existing callers see no change). Every note links to
+  one source (claude.ai URL, Duet channel + message id, or Claude Code session
+  + machine + job id) and is refused without it; notes are append-only
+  (triggers refuse UPDATE/DELETE) and redacted at write and again on the hub.
+  `notes sweep` writes a note for sessions idle 5 minutes (or at session end),
+  covering only what is new since the last note. The hub's index unit indexes
+  `inbox/<machine>/notes/` into the notes store.
+
 ## [0.17.0] — 2026-10-15
 
 ### Added
