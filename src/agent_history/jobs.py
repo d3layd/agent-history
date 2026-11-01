@@ -39,13 +39,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterator
 
-from . import config, ship, textproc, trigger
+from . import config, redact, ship, textproc, trigger
 from .adapters import Record
 from .adapters.claude_code import SKIP_PREFIXES, ClaudeCodeAdapter, _texts
 from .textproc import MIN_CHARS, scrub
 
 AGENT = "claude-code"
 JOB_ID = re.compile(r"^cj_(\d{8}T\d{6}Z)_([0-9a-f]{6})$")
+# A Boat sandbox id (bx_…), or anything filename-safe the job named its VM.
+VM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$")
 
 EXIT_OK = 0
 EXIT_UNCONFIRMED = 1
@@ -116,6 +118,20 @@ class Job:
     def finished(self) -> datetime.datetime | None:
         return self._time(_END_KEYS)
 
+    def vm_session(self, vm_id: str) -> str:
+        """The conversation a Boat VM's transcripts are filed under."""
+        return f"{self.job_id}/vm/{vm_id}"
+
+    def vm_dirs(self) -> list[Path]:
+        """Pulled VM copies, ``vms/<vm_id>/``; in-flight ``.<vm>.part``
+        directories are skipped by name."""
+        root = self.path / "vms"
+        try:
+            return sorted(p for p in root.iterdir()
+                          if VM_ID.match(p.name) and p.is_dir() and not p.is_symlink())
+        except OSError:
+            return []
+
     def cwd(self, real: str) -> str:
         """A cwd that contains the job id: the real one when it already does
         (the job's own worktree), else the job directory."""
@@ -160,6 +176,7 @@ class Collected:
     result: str          # the transcript's result subtype, or "missing"
     worktree: str
     model: str
+    vms: dict = dataclasses.field(default_factory=dict)  # vm id -> its files
 
 
 def _parse_time(value: object) -> datetime.datetime | None:
@@ -302,14 +319,79 @@ def collect(job: Job, projects: Path) -> Collected:
                 cwd=job.cwd(worktree), timestamp=stamp or synthetic, role=kind,
                 text=scrub(text)), entry.get("session_id")))
 
+    vms: dict[str, list[Path]] = {}
+    for vm_dir in job.vm_dirs():
+        files = vm_files(vm_dir)
+        vms[vm_dir.name] = files
+        out += vm_records(job, vm_dir.name, files)
+
     header = Record(agent=AGENT, origin=str(job.path / "job.json"),
                     session_id=job.job_id, cwd=job.cwd(worktree),
                     timestamp=_iso(base), role="job",
-                    text=header_text(job, sids, worktree, model))
+                    text=header_text(job, sids, worktree, model, list(vms)))
     sources = ([job.transcript] if job.transcript.is_file() else []) + session_files
+    sources += [f for files in vms.values() for f in files]
     return Collected(records=[_with_claude_list(extra, header, sids)] + out,
                      sources=sources, sessions=sids, result=result,
-                     worktree=worktree, model=model)
+                     worktree=worktree, model=model, vms=vms)
+
+
+def vm_files(vm_dir: Path) -> list[Path]:
+    projects = vm_dir / "projects"
+    if not projects.is_dir():
+        return []
+    return sorted(f for f in projects.rglob("*.jsonl")
+                  if f.is_file() and not f.is_symlink())
+
+
+def vm_records(job: Job, vm_id: str, files: list[Path]) -> list[tuple[Record, dict]]:
+    """One VM's records: a header, then its session files, all filed under
+    the VM's own conversation."""
+    extra = header_object(job, kind="vm", vm_id=vm_id)
+    session = job.vm_session(vm_id)
+    records: list[Record] = []
+    sids: list[str] = []
+    real_cwd = ""
+    tagged: list[tuple[Record, dict]] = []
+    for path in files:
+        for record in _file_records(path):
+            real_cwd = real_cwd or record.cwd
+            if record.session_id and record.session_id not in sids:
+                sids.append(record.session_id)
+            moved = dataclasses.replace(record, session_id=session, cwd=job.cwd(record.cwd))
+            records.append(moved)
+            tagged.append(_with_claude(extra, moved, record.session_id))
+    if not records:
+        return []
+    stamps = [r.timestamp for r in records if r.timestamp]
+    lines = [f"[claude-jobs vm] {job.job_id} vm {vm_id}",
+             f"Job: {job.job_id}"]
+    for label, value in (("Duet channel", job.channel),
+                         ("Studio task", job.task_key),
+                         ("VM cwd", real_cwd),
+                         ("Claude session", ", ".join(sids))):
+        if value:
+            lines.append(f"{label}: {value}")
+    lines.append(f"Files: {len(files)}")
+    # Binds an index confirmation to this exact copy (piece B's deletion gate).
+    lines.append(f"Copy: sha256 {vm_copy_digest(job, vm_id, files)}")
+    header = Record(agent=AGENT, origin=str(job.path / "vms" / vm_id),
+                    session_id=session, cwd=job.cwd(real_cwd),
+                    timestamp=min(stamps) if stamps else _iso(job.started()),
+                    role="job", text="\n".join(lines))
+    return [_with_claude_list(extra, header, sids)] + tagged
+
+
+def vm_copy_digest(job: Job, vm_id: str, files: list[Path]) -> str:
+    """sha256 over a VM's pulled transcript files (names and content)."""
+    return _digest(files, job.path / "vms" / vm_id / "projects")
+
+
+def record_digest(record: Record) -> str:
+    """The hash `ship` gives this record (it hashes the redacted text)."""
+    text, _ = redact.redact(record.text)
+    return ship.record_hash(record.agent, record.origin, record.session_id,
+                            record.timestamp, record.role, text)
 
 
 def header_object(job: Job, **more: str) -> dict:
@@ -320,7 +402,8 @@ def header_object(job: Job, **more: str) -> dict:
     return {"job": obj}
 
 
-def header_text(job: Job, sessions: list[str], worktree: str, model: str) -> str:
+def header_text(job: Job, sessions: list[str], worktree: str, model: str,
+                vms: list[str] | None = None) -> str:
     """The searchable text of the job's header record."""
     ask = job.field("ask", "prompt")
     if len(ask) > MAX_ASK_CHARS:
@@ -333,6 +416,7 @@ def header_text(job: Job, sessions: list[str], worktree: str, model: str) -> str
                          ("Branch", job.field("branch")),
                          ("Worktree", worktree),
                          ("Claude session", ", ".join(sessions)),
+                         ("Boat VMs", ", ".join(vms or [])),
                          ("Model", model)):
         if value:
             lines.append(f"{label}: {value}")
@@ -354,14 +438,17 @@ def _result_text(entry: dict) -> str:
     return head + ("\n" + body.strip() if isinstance(body, str) and body.strip() else "")
 
 
-def _digest(paths: list[Path], root: Path) -> str:
+def _digest(paths: list[Path], *roots: Path) -> str:
     """One sha256 over the source files (name and content), stable order."""
     total = hashlib.sha256()
     for path in sorted(paths, key=str):
-        try:
-            name = str(path.relative_to(root))
-        except ValueError:
-            name = path.name
+        name = path.name
+        for root in roots:
+            try:
+                name = str(path.relative_to(root))
+                break
+            except ValueError:
+                continue
         total.update(name.encode("utf-8") + b"\0")
         try:
             total.update(hashlib.sha256(path.read_bytes()).digest())
@@ -380,7 +467,9 @@ def conversations(job: Job, found: Collected) -> list[str]:
 def seal_record(job: Job, found: Collected, projects: Path) -> Record:
     """The final ship's statement of what it shipped. Deterministic for the
     same sources, so a repeated ship-final adds nothing."""
-    counts = Counter("transcript" if r.origin == str(job.transcript)
+    vm_prefix = job.job_id + "/vm/"
+    counts = Counter("vm" if r.session_id.startswith(vm_prefix)
+                     else "transcript" if r.origin == str(job.transcript)
                      else "header" if r.role == "job" else "session"
                      for r, _ in found.records)
     stamps = [r.timestamp for r, _ in found.records if r.timestamp]
@@ -390,12 +479,14 @@ def seal_record(job: Job, found: Collected, projects: Path) -> Record:
         f"[claude-jobs final] {job.job_id} complete",
         f"Status: {job.field('status') or 'unknown'}",
         f"Records: {len(found.records)} (session files {counts['session']}, "
-        f"transcript.jsonl {counts['transcript']}, header {counts['header']})",
+        f"transcript.jsonl {counts['transcript']}, header {counts['header']}"
+        + (f", Boat VMs {counts['vm']} from {len(found.vms)} VM(s): "
+           f"{', '.join(found.vms)}" if found.vms else "") + ")",
         f"Transcript result: {found.result}",
         f"Sessions: {', '.join(conversations(job, found))}",
         f"Claude sessions: {', '.join(found.sessions) or 'none'}",
         f"Sources: {len(found.sources)} file(s), sha256 "
-        f"{_digest(found.sources, projects if projects.is_dir() else job.path)}",
+        f"{_digest(found.sources, projects, job.path)}",
     ])
     return Record(agent=AGENT, origin=str(job.path / "job.json"),
                   session_id=job.job_id, cwd=job.cwd(found.worktree),

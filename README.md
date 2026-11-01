@@ -613,6 +613,23 @@ the hub through the existing read-only `serve-ssh` key
 (`AGENT_HISTORY_REMOTE`), or with `--local` the local index on the hub itself. Install steps: [`deploy/claude-jobs/`](deploy/claude-jobs/README.md);
 design: [`docs/design/claude-jobs-shipper.md`](docs/design/claude-jobs-shipper.md).
 
+### Boat VMs: `boat-export` before teardown
+
+A fleet job that runs Claude Code on Boat VMs keeps them stopped (paused)
+until the work is verified, then runs
+`agent-history boat-export --job <job_id> <vm_id>...`. For each VM it resumes
+a stopped VM, pulls `~/.claude/projects` with `boat scp`, checks the copy
+against the VM's own sha256 list, stops the VM again (also on failure), and
+ships the job with `ship-jobs --final`. Exit 0 means the hub confirmed every
+record arrived **and** the runner's `confirm-indexed` result
+(`<jobs>/<job_id>/index-confirmed.json`) says the VM's session is indexed, so
+the VM is safe to delete. Exit 4 means arrived, awaiting index confirmation.
+The tool never deletes a VM itself (`boat-export --check … && boat delete …`
+is the caller's step). Each VM reads back as
+its own conversation, `history_show(session="<job_id>/vm/<vm_id>")`.
+`--check` re-confirms an earlier export from its receipt without calling
+Boat. Design: [`docs/design/boat-vm-transcripts.md`](docs/design/boat-vm-transcripts.md).
+
 ### MCP server: claude.ai and other MCP clients
 
 `agent-history mcp` serves the hub's history as MCP tools, so Claude on
