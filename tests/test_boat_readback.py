@@ -7,11 +7,16 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from agent_history import boat_export, jobs  # noqa: E402
+from agent_history import boat_export, jobs, store  # noqa: E402
 from jobfixtures import GH, JOB, make_job  # noqa: E402
 from test_boat_export import ROWS, VM, VSID, FakeBoat  # noqa: E402
 from test_jobs_readback import deliver_and_index, hub  # noqa: E402,F401
 from test_mcp import data, run_calls  # noqa: E402
+
+pytestmark = pytest.mark.skipif(
+    not store.extensions_supported(),
+    reason="this Python cannot load SQLite extensions",
+)
 
 
 def test_parent_reads_a_vm_back_by_job_id_and_vm_id(hub, tmp_path):  # noqa: F811
