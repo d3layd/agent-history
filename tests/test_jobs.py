@@ -55,6 +55,30 @@ def test_every_record_carries_the_job_in_path_and_header(env):
                                "studio_task_key": "ATR-31", "kind": "job"}
 
 
+def test_every_record_carries_the_claude_session_uuid(env):
+    job(env, subagent=[session_line("assistant", "Side chain: checked the cookie flags.",
+                                    "2026-11-01T12:02:00.000Z")])
+    assert jobs.run(JOB) == 0
+    lines = shipped_lines(env["landing"])
+    for line in lines:
+        assert line["claude_session_id"] == SID
+        assert ["claude", SID] in line["aliases"]
+    for line in lines:
+        if line["role"] == "job":
+            assert line["claude_session_ids"] == [SID]
+    (seal,) = [l for l in lines if l["text"].startswith("[claude-jobs final]")]
+    assert f"Sessions: {JOB}" in seal["text"]
+    assert f"Claude sessions: {SID}" in seal["text"]
+
+
+def test_session_ids_listed_in_job_json_are_used(env):
+    other = "77777777-0000-4000-8000-00000000cccc"
+    job(env, meta={"session_id": SID, "claude_session_ids": [SID, other]})
+    jobs.run()
+    (header,) = [l for l in shipped_lines(env["landing"]) if l["role"] == "job"]
+    assert header["claude_session_ids"] == [SID, other]
+
+
 def test_the_header_record_makes_the_job_findable_by_text(env):
     job(env)
     jobs.run()
@@ -179,6 +203,7 @@ def test_final_confirms_and_adds_a_seal(env, capsys):
     assert f"[claude-jobs final] {JOB} complete" in seal["text"]
     assert "Transcript result: success" in seal["text"]
     assert "Records: 6 (session files 2, transcript.jsonl 3, header 1)" in seal["text"]
+    assert f"Sessions: {JOB}" in seal["text"]
     state = ship.State.open(writable=False)
     try:
         assert not state.db.execute("SELECT COUNT(*) FROM queued").fetchone()[0]

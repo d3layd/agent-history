@@ -196,17 +196,43 @@ def _transcript_lines(job: Job) -> list[dict]:
     return out
 
 
+_CLAUDE_SID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
 def _session_ids(job: Job, lines: list[dict]) -> list[str]:
+    """The job's Claude Code session uuids: job.json first (the runner's
+    ``session_id`` and ``claude_session_ids``), then the transcript's."""
     found: list[str] = []
-    listed = job.meta.get("session_ids")
     candidates = [job.meta.get("session_id")]
-    candidates += listed if isinstance(listed, list) else []
+    for key in ("claude_session_ids", "session_ids"):
+        listed = job.meta.get(key)
+        candidates += listed if isinstance(listed, list) else []
     candidates += [entry.get("session_id") for entry in lines]
     for sid in candidates:
-        if (isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", sid)
-                and sid not in found):
+        if isinstance(sid, str) and _CLAUDE_SID.match(sid) and sid not in found:
             found.append(sid)
     return found
+
+
+def _with_claude(extra: dict, record: Record, claude_sid: object) -> tuple[Record, dict]:
+    """Attach the real Claude Code session uuid: a structured field on the
+    wire line, and a ``claude`` link alias so a hub that knows the kind can
+    resolve history_show(session=<uuid>)."""
+    if not (isinstance(claude_sid, str) and _CLAUDE_SID.match(claude_sid)):
+        return record, extra
+    aliases = tuple(record.aliases) + (("claude", claude_sid),)
+    return (dataclasses.replace(record, aliases=aliases),
+            {**extra, "claude_session_id": claude_sid})
+
+
+def _with_claude_list(extra: dict, record: Record, sids: list[str]) -> tuple[Record, dict]:
+    """For header and seal records: every uuid of the conversation."""
+    sids = [s for s in sids if _CLAUDE_SID.match(s)][:16]
+    if not sids:
+        return record, extra
+    aliases = tuple(record.aliases) + tuple(("claude", s) for s in sids)
+    return (dataclasses.replace(record, aliases=aliases),
+            {**extra, "claude_session_id": sids[0], "claude_session_ids": sids})
 
 
 def _session_files(root: Path, session_ids: list[str]) -> list[Path]:
@@ -242,8 +268,9 @@ def collect(job: Job, projects: Path) -> Collected:
         for record in _file_records(path):
             worktree = worktree or record.cwd
             latest = max(latest, record.timestamp or "")
-            out.append((dataclasses.replace(
-                record, session_id=job.job_id, cwd=job.cwd(record.cwd)), extra))
+            out.append(_with_claude(extra, dataclasses.replace(
+                record, session_id=job.job_id, cwd=job.cwd(record.cwd)),
+                record.session_id))
 
     result = "missing"
     origin = str(job.transcript)
@@ -259,10 +286,10 @@ def collect(job: Job, projects: Path) -> Collected:
             result = str(entry.get("subtype") or ("error" if entry.get("is_error") else "success"))
             finished = job.finished()
             when = (_iso(finished) if finished else latest) or synthetic
-            out.append((Record(
+            out.append(_with_claude(extra, Record(
                 agent=AGENT, origin=origin, session_id=job.job_id,
                 cwd=job.cwd(worktree), timestamp=stamp or when, role="result",
-                text=_result_text(entry)), extra))
+                text=_result_text(entry)), entry.get("session_id")))
             continue
         if kind not in ("user", "assistant"):
             continue
@@ -270,18 +297,19 @@ def collect(job: Job, projects: Path) -> Collected:
             text = text.strip()
             if len(text) < MIN_CHARS or text.startswith(SKIP_PREFIXES):
                 continue
-            out.append((Record(
+            out.append(_with_claude(extra, Record(
                 agent=AGENT, origin=origin, session_id=job.job_id,
                 cwd=job.cwd(worktree), timestamp=stamp or synthetic, role=kind,
-                text=scrub(text)), extra))
+                text=scrub(text)), entry.get("session_id")))
 
     header = Record(agent=AGENT, origin=str(job.path / "job.json"),
                     session_id=job.job_id, cwd=job.cwd(worktree),
                     timestamp=_iso(base), role="job",
                     text=header_text(job, sids, worktree, model))
     sources = ([job.transcript] if job.transcript.is_file() else []) + session_files
-    return Collected(records=[(header, extra)] + out, sources=sources,
-                     sessions=sids, result=result, worktree=worktree, model=model)
+    return Collected(records=[_with_claude_list(extra, header, sids)] + out,
+                     sources=sources, sessions=sids, result=result,
+                     worktree=worktree, model=model)
 
 
 def header_object(job: Job, **more: str) -> dict:
@@ -342,6 +370,13 @@ def _digest(paths: list[Path], root: Path) -> str:
     return total.hexdigest()
 
 
+def conversations(job: Job, found: Collected) -> list[str]:
+    """Every hub session this job is filed under: the job itself, then one
+    per Boat VM (piece B)."""
+    vms = getattr(found, "vms", None) or {}
+    return [job.job_id] + [f"{job.job_id}/vm/{vm}" for vm in vms]
+
+
 def seal_record(job: Job, found: Collected, projects: Path) -> Record:
     """The final ship's statement of what it shipped. Deterministic for the
     same sources, so a repeated ship-final adds nothing."""
@@ -357,6 +392,8 @@ def seal_record(job: Job, found: Collected, projects: Path) -> Record:
         f"Records: {len(found.records)} (session files {counts['session']}, "
         f"transcript.jsonl {counts['transcript']}, header {counts['header']})",
         f"Transcript result: {found.result}",
+        f"Sessions: {', '.join(conversations(job, found))}",
+        f"Claude sessions: {', '.join(found.sessions) or 'none'}",
         f"Sources: {len(found.sources)} file(s), sha256 "
         f"{_digest(found.sources, projects if projects.is_dir() else job.path)}",
     ])
@@ -429,8 +466,9 @@ def _run_locked(dest: str | None, root: Path, final: str | None,
             found = collect(job, projects)
             records = list(found.records)
             if final:
-                records.append((seal_record(job, found, projects),
-                                header_object(job)))
+                records.append(_with_claude_list(
+                    header_object(job), seal_record(job, found, projects),
+                    found.sessions))
             batches = ship.Batches(state, outbox, dry_run, prefix=f"{job.job_id}-")
             for record, extra in records:
                 if textproc.is_injection(record.text):

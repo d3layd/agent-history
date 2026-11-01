@@ -11,8 +11,8 @@ from . import (__version__, adapters, config, embed, index, inject, scrub,
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub", "ship", "ship-jobs", "serve-ssh", "mcp",
-            "import"}
+            "purge", "strict", "scrub", "ship", "ship-jobs", "confirm-indexed",
+            "serve-ssh", "mcp", "import"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -97,6 +97,16 @@ def _build_parser() -> argparse.ArgumentParser:
                           "to finish (default 300)")
     sjb.add_argument("--dry-run", action="store_true", dest="dry_run",
                      help="report what would be sent; write and upload nothing")
+
+    cix = sub.add_parser(
+        "confirm-indexed",
+        help="has the hub indexed a claude -p job? 0 yes, 1 not yet or partial, "
+             "2 config or credential error (run on Clamps' side, never as claude-jobs)")
+    cix.add_argument("--job", required=True, metavar="JOB_ID")
+    cix.add_argument("--json", action="store_true", dest="as_json")
+    cix.add_argument("--receipt", metavar="FILE",
+                     help="also write the result JSON to FILE (atomically)")
+    cix.add_argument("--tenant", help="hub tenant to read (a key that reads several)")
 
     ssh = sub.add_parser(
         "serve-ssh",
@@ -538,6 +548,10 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if args.command == "ship-jobs":
             from . import jobs
             return jobs.run(args.final, dry_run=args.dry_run, wait=args.wait)
+        if args.command == "confirm-indexed":
+            from . import confirm
+            return confirm.run(args.job, as_json=args.as_json, receipt=args.receipt,
+                               tenant=args.tenant)
         if args.command == "serve-ssh":
             from . import serve_ssh
             return serve_ssh.run(args.tenants)

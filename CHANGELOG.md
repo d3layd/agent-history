@@ -23,6 +23,17 @@ they have no corresponding tags.
   every record of the job, seal included. User units for a 2-minute timer in
   `deploy/claude-jobs/`.
 - `ship`'s batches accept a file-name prefix and extra (redacted) wire fields.
+- **`agent-history confirm-indexed --job <job_id>`**: the index gate after
+  `ship-final`. Exit 0 when the job's header, seal and every session it lists
+  are findable by job id (the same search and show the MCP tools use); 1 not
+  yet or partial; 2 config or credential error. Reads the hub over the
+  existing read-only `serve-ssh` key, refuses to run as `claude-jobs`, and can
+  write its JSON result to a receipt file.
+- Job records carry `claude_session_id` (header and seal: `claude_session_ids`)
+  and a new `claude` alias kind, so `history_show(session=<Claude session
+  uuid>)` resolves to the job on an upgraded hub; `history_recall` and
+  `history_show` results list `claude_session_ids`. The seal lists every
+  session (`Sessions:`) and uuid (`Claude sessions:`).
 
 ## [0.17.0] — 2026-10-15
 

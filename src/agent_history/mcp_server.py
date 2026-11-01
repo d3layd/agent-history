@@ -34,7 +34,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from . import config, embed, redact, search, show, store
+from . import config, embed, redact, search, sessions, show, store
 from .mcp_auth import Identity, RateLimiter, TokenStore, bearer
 
 SURFACE = "claude-ai-chat"
@@ -112,6 +112,29 @@ def _resolve(session: str) -> str | None:
         db.close()
 
 
+def _claude_ids(uids: set[str]) -> dict[str, list[str]]:
+    """uid -> the real Claude Code session uuids linked to it (``claude``
+    aliases, set by job shippers). Empty when the index has none."""
+    out: dict[str, list[str]] = {}
+    uids = {u for u in uids if u}
+    if not uids or not config.db_path().exists():
+        return out
+    try:
+        db = store.open_for_read(check_model=False)
+    except store.StoreError:
+        return out
+    try:
+        for uid in uids:
+            found = [v for k, v in sessions.links_of(db, uid) if k == "claude"]
+            if found:
+                out[uid] = found
+    except Exception:  # noqa: BLE001 - an index without session tables
+        return {}
+    finally:
+        db.close()
+    return out
+
+
 def _require(identity: Identity | None, scope: str) -> Identity:
     if identity is None:
         raise ToolFailure("unauthorized")
@@ -153,9 +176,12 @@ def recall(identity: Identity | None, query: str, *, k: int = DEFAULT_K,
             except embed.EmbedError as exc:
                 raise ToolFailure(f"embedding unavailable ({exc}); "
                                   "retry with mode='text'") from None
+        claude = _claude_ids({row.get("session_uid") or "" for row in rows[:k]})
 
     results = []
     for rank, row in enumerate(rows[:k], 1):
+        extra = ({"claude_session_ids": claude[row["session_uid"]]}
+                 if row.get("session_uid") in claude else {})
         results.append({
             "rank": rank,
             "timestamp": row.get("timestamp") or "",
@@ -168,6 +194,7 @@ def recall(identity: Identity | None, query: str, *, k: int = DEFAULT_K,
             "score": row.get("score"),
             "distance": row.get("distance"),
             "excerpt": _clip(row.get("text") or "", EXCERPT_CHARS),
+            **extra,
         })
     return {"query": query, "mode": mode, "count": len(results),
             "results": results}
@@ -192,11 +219,15 @@ def show_session(identity: Identity | None, session: str, *,
                         rows = show.rows_for(uid, around=around, limit=limit)
             except store.StoreError as exc:
                 raise ToolFailure(str(exc)) from None
+        claude = _claude_ids({rows[0].get("session_uid") or ""}) if rows else {}
     if not rows:
         raise ToolFailure(f"nothing indexed for session {session!r}")
 
     first = rows[0]
+    extra = ({"claude_session_ids": claude[first["session_uid"]]}
+             if first.get("session_uid") in claude else {})
     return {
+        **extra,
         "session": _session_of(first) or session,
         "session_id": first.get("session_id") or "",
         "agent": first.get("agent") or "",

@@ -78,6 +78,34 @@ sudo install -d -o root -g root -m 0755 /usr/local/lib/claude-jobs
 sudo install -o root -g root -m 0755 /tmp/ah-deploy/deploy/claude-jobs/ship-final /usr/local/lib/claude-jobs/ship-final
 ```
 
+## 4. Clamps: the index gate (`confirm-indexed`)
+
+The runner's index confirmer (clamps-bridge, as `ops_a0dc6f0c`) runs
+`agent-history confirm-indexed --job <id>` once a minute for up to 15 minutes
+after `ship-final`. It uses the read-only hub key Clamps already has for
+`ah-search`; nothing is added to claude-jobs.
+
+```bash
+# as ops_a0dc6f0c: upgrade agent-history to a version with confirm-indexed
+uv tool install --force "agent-history @ git+https://github.com/d3layd/agent-history@feat/claude-jobs-shipper"
+# clamps-bridge must run it with the same hub settings ah-search loads
+# (AGENT_HISTORY_REMOTE, AGENT_HISTORY_REMOTE_KEY), e.g. in its env file, or set
+#   CLAMPS_BRIDGE_CONFIRM_INDEXED_CMD="<a wrapper that loads them> confirm-indexed"
+agent-history confirm-indexed --job <a finished job id>; echo "exit $?"
+```
+
+## 5. Hub: uuid lookup with history_show (optional, needs the upgrade)
+
+`history_show(session=<Claude session uuid>)` needs the hub's indexer and MCP
+server on a version that knows the `claude` alias kind. Job records shipped
+before the upgrade carry the alias too; the indexer links it the next time it
+sees the session's records (in practice: new jobs).
+
+```bash
+sudo -iu ahub uv tool install --force "agent-history[mcp] @ git+https://github.com/d3layd/agent-history@<merged ref>"
+sudo systemctl restart agent-history-mcp
+```
+
 ## Verify
 
 ```bash

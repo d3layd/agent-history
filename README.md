@@ -596,11 +596,21 @@ history_recall(query="cj_20261101T120000Z_a1b2c3", mode="text", cwd="cj_20261101
 history_show(session="cj_20261101T120000Z_a1b2c3", limit=50)
 ```
 
+Every record also carries the real Claude Code session uuid
+(`claude_session_id`, plus a `claude` link alias), so
+`history_recall("<uuid>", mode="text")` finds the job, and on a hub with this
+version `history_show(session="<uuid>")` resolves to it too.
+
 `agent-history ship-jobs --final <job_id>` (wrapped as
 `deploy/claude-jobs/ship-final`) is the runner's last step before a job is
 marked done: it waits for the ship lock, adds a seal record, and exits 0 only
 once rsync has confirmed every batch of the job (1 unconfirmed, 2 bad
-input/config, 3 lock busy). Install steps: [`deploy/claude-jobs/`](deploy/claude-jobs/README.md);
+input/config, 3 lock busy). Indexing is confirmed separately, on the runner's
+side and never as the job user, with
+`agent-history confirm-indexed --job <job_id> [--json] [--receipt FILE]`
+(0 indexed, 1 not yet or partial, 2 config or credential error). It reads
+the hub through the existing read-only `serve-ssh` key
+(`AGENT_HISTORY_REMOTE`), or the local index when none is set. Install steps: [`deploy/claude-jobs/`](deploy/claude-jobs/README.md);
 design: [`docs/design/claude-jobs-shipper.md`](docs/design/claude-jobs-shipper.md).
 
 ### MCP server: claude.ai and other MCP clients
