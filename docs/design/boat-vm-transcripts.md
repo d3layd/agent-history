@@ -17,10 +17,20 @@ agent-history boat-export --job <job_id> <vm_id> [<vm_id> ...]
 ```
 
 Exit 0 means: every listed VM's full `~/.claude/projects` was pulled,
-matched the VM byte for byte, was shipped to the hub, and the hub confirmed
-it. Only then may the fleet job run `boat delete`. Any other exit leaves
-every VM stopped (paused) and deletes nothing. `boat-export` never deletes a
-VM itself.
+matched the VM byte for byte, arrived on the hub (rsync confirmed), **and the
+hub has indexed it** (the runner's `confirm-indexed` says so). Only then may
+the fleet job run `boat delete`. Exit 4 means "arrived, awaiting index
+confirmation": the VM is stopped and safe to keep, not yet safe to delete.
+Any other exit also leaves every VM stopped (paused) and deletes nothing.
+`boat-export` never deletes a VM itself.
+
+| exit | meaning |
+|---|---|
+| 0 | arrived and indexed: safe to delete |
+| 4 | arrived, index not confirmed yet: keep it stopped, poll `--check` |
+| 1 | a VM failed (pull, verify, stop) or the hub didn't confirm arrival |
+| 2 | bad job id, VM id, job dir, or no hub configured |
+| 3 | another ship held the lock |
 
 The VMs need nothing installed: no agent-history, no connector, no hub key.
 Everything is pulled from the outside with the Boat CLI.
@@ -46,6 +56,37 @@ This follows the runbook's layout: "before deletion the job copies each VM's
 ~/.claude/projects folder into the job folder (one sub-folder per VM id) and
 runs the shipper once."
 
+## The index gate: how claude-jobs learns indexing is confirmed
+
+`boat-export` runs as claude-jobs, which stays upload-only: it cannot read
+the hub, so it cannot check indexing itself. The check runs on the runner's
+side (`agent-history confirm-indexed --job <job_id>`, as Clamps, piece A),
+and its result comes back as a file in the job directory:
+
+```
+<jobs>/<job_id>/index-confirmed.json    the JSON of `confirm-indexed --json` (or --receipt)
+```
+
+`boat-export` and `boat-export --check` treat a VM as indexed only when that
+file names this job, says `"state": "indexed"`, lists the VM's session
+`<job_id>/vm/<vm_id>` in `sessions`, and was checked after the VM's export
+(`checked_at` >= the receipt's `exported_at`, so a confirmation from before
+a re-export does not count). `--index-receipt FILE` points elsewhere.
+
+Flow on the fleet:
+
+```
+fleet job (claude-jobs)      boat-export --job J bx_1      → 4: arrived, stopped
+runner (Clamps, 1/min)       confirm-indexed --job J        → 0 once indexed
+runner → job dir             write the JSON to <jobs>/J/index-confirmed.json
+                             (the runner's `claude-job set-indexed`, which runs as claude-jobs)
+fleet job or cleanup         boat-export --job J --check bx_1 && boat delete bx_1
+```
+
+The confirmation sits in a directory claude-jobs owns, so a job could forge
+it. That would only let a job delete its own VMs early and lose its own
+transcripts; it gives no read access to anything.
+
 ## File, path and header layout
 
 On fleet-1, inside the job directory:
@@ -63,6 +104,10 @@ differences:
   conversation: `history_show(session="<job_id>/vm/<vm_id>")`. The parent
   job's own conversation stays `history_show(session="<job_id>")`.
 - the `job` object says `"kind": "vm", "vm_id": "<vm_id>"`.
+- each record carries the VM's own Claude Code session uuid
+  (`claude_session_id` and a `claude` alias, piece A), so
+  `history_show(session="<uuid>")` opens that VM's conversation on an
+  upgraded hub.
 
 Each VM also gets a header record, `role: "job"`, whose text starts
 `[claude-jobs vm] <job_id> vm <vm_id>` and names the Duet channel, Studio
@@ -109,6 +154,7 @@ VM keeps its disk for 14 days, so a failed export can be retried.
 | `boat stop` does not reach `stopped` | reported; the VM is not counted as exported | 1 |
 | hub upload fails or is unconfirmed | copies stay in the job dir, batches stay queued, no receipt | 1 |
 | another ship holds the lock past `--wait` | as above | 3 |
+| arrived but the index confirmation is missing, partial, stale, or doesn't list the VM | VM stays stopped, receipt kept | 4 |
 | bad job id, missing job, bad VM id, no hub configured | nothing is touched | 2 |
 
 With several VMs, the ones that succeeded are listed as safe and the rest
@@ -125,9 +171,10 @@ history_show(session="cj_20261101T120000Z_a1b2c3/vm/bx_u6qgdzjq", limit=50)
 ## What the fleet job's teardown does (contract for the job runner)
 
 ```
-agent-history boat-export --job "$JOB" "$VM" && boat delete "$VM"
+agent-history boat-export --job "$JOB" "$VM"     # 4 until indexing is confirmed
+# ... the runner writes <jobs>/$JOB/index-confirmed.json after confirm-indexed exits 0
+agent-history boat-export --job "$JOB" --check "$VM" && boat delete "$VM"
 ```
 
-or, when deletion happens later, `agent-history boat-export --job "$JOB"
---check "$VM" && boat delete "$VM"`. The runner owns `boat delete`; this
+`&&` stays safe: only exit 0 deletes. The runner owns `boat delete`; this
 tool never calls it.
