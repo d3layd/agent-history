@@ -11,7 +11,8 @@ from . import (__version__, adapters, config, embed, index, inject, scrub,
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub", "ship", "serve-ssh", "mcp", "import"}
+            "purge", "strict", "scrub", "ship", "ship-jobs", "serve-ssh", "mcp",
+            "import"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -84,6 +85,18 @@ def _build_parser() -> argparse.ArgumentParser:
                      dest="backfill",
                      help="also send chunks already in the local index "
                           "(covers transcripts no longer on disk)")
+
+    sjb = sub.add_parser(
+        "ship-jobs", help="send claude -p job transcripts to the hub "
+                          "(AGENT_HISTORY_JOBS_DIR, AGENT_HISTORY_HUB_INGEST)")
+    sjb.add_argument("--final", metavar="JOB_ID",
+                     help="ship one job and exit 0 only once the hub has "
+                          "confirmed every record of it (the runner's last step)")
+    sjb.add_argument("--wait", type=int, default=300, metavar="SECONDS",
+                     help="with --final: how long to wait for another ship "
+                          "to finish (default 300)")
+    sjb.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="report what would be sent; write and upload nothing")
 
     ssh = sub.add_parser(
         "serve-ssh",
@@ -522,6 +535,9 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                             where=args.where, tenant=args.tenant)
         if args.command == "ship":
             return ship.run(dry_run=args.dry_run, backfill=args.backfill)
+        if args.command == "ship-jobs":
+            from . import jobs
+            return jobs.run(args.final, dry_run=args.dry_run, wait=args.wait)
         if args.command == "serve-ssh":
             from . import serve_ssh
             return serve_ssh.run(args.tenants)

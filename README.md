@@ -578,6 +578,31 @@ templated systemd units for the hub's indexer (`agent-history-hub-index@<tenant>
 (`agent-history-mcp.service`), a user unit and timer for shipping, and
 `authorized_keys.example`.
 
+### `claude -p` jobs: `ship-jobs` and the final-ship hook
+
+A user that runs headless `claude -p` jobs (one directory per job under
+`AGENT_HISTORY_JOBS_DIR`, default `/var/lib/claude-jobs/jobs/<job_id>/` with
+`job.json` and the stream-json `transcript.jsonl`) ships with
+`agent-history ship-jobs` instead of `ship`. It sends the job's Claude Code
+session files and `transcript.jsonl` through the same upload-only key, with
+every record filed under `session_id = <job id>`, a `cwd` that contains the
+job id, a `job` object on each line (job id, owning Duet channel, Studio task
+key), batch files named `<job_id>-….jsonl`, and a header record whose text
+names all of them. A parent agent reads a job back with the hub's existing
+tools, no hub change needed:
+
+```text
+history_recall(query="cj_20261101T120000Z_a1b2c3", mode="text", cwd="cj_20261101T120000Z_a1b2c3")
+history_show(session="cj_20261101T120000Z_a1b2c3", limit=50)
+```
+
+`agent-history ship-jobs --final <job_id>` (wrapped as
+`deploy/claude-jobs/ship-final`) is the runner's last step before a job is
+marked done: it waits for the ship lock, adds a seal record, and exits 0 only
+once rsync has confirmed every batch of the job (1 unconfirmed, 2 bad
+input/config, 3 lock busy). Install steps: [`deploy/claude-jobs/`](deploy/claude-jobs/README.md);
+design: [`docs/design/claude-jobs-shipper.md`](docs/design/claude-jobs-shipper.md).
+
 ### MCP server: claude.ai and other MCP clients
 
 `agent-history mcp` serves the hub's history as MCP tools, so Claude on

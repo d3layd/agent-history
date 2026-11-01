@@ -124,6 +124,13 @@ def outbox_dir() -> Path:
     return data_home() / "outbox"
 
 
+def jobs_dir() -> Path:
+    """Where the claude -p job runner keeps one directory per job
+    (``<jobs>/<job_id>/job.json`` and ``transcript.jsonl``)."""
+    raw = (_env("AGENT_HISTORY_JOBS_DIR", "") or "").strip()
+    return Path(raw).expanduser() if raw else Path("/var/lib/claude-jobs/jobs")
+
+
 def machine_id() -> str:
     """Name of this machine in a shared index: $AGENT_HISTORY_MACHINE or the
     short hostname. Kept to filename-safe characters because the hub uses the

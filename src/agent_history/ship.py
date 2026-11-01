@@ -94,6 +94,11 @@ class State:
             db.executescript(_SCHEMA)
         return cls(db, False)
 
+    def shipped(self, digest: str) -> bool:
+        """Whether ``digest`` is confirmed delivered (not merely queued)."""
+        return self.db.execute(
+            "SELECT 1 FROM shipped WHERE hash = ?", (digest,)).fetchone() is not None
+
     def known(self, digest: str) -> bool:
         return self.db.execute(
             "SELECT 1 FROM shipped WHERE hash = ? UNION ALL "
@@ -147,10 +152,14 @@ class State:
 class Batches:
     """Collects redacted records and writes them out as immutable batch files."""
 
-    def __init__(self, state: State, outbox: Path, dry_run: bool) -> None:
+    def __init__(self, state: State, outbox: Path, dry_run: bool,
+                 prefix: str = "") -> None:
         self.state = state
         self.outbox = outbox
         self.dry_run = dry_run
+        # Prepended to every batch file name, e.g. a job id, so the name on
+        # the hub (and in its .processed archive) says what the batch holds.
+        self.prefix = prefix
         self.machine = config.machine_id()
         self.pending: list[tuple[str, str]] = []   # (hash, json line)
         self.seen: set[str] = set()
@@ -168,17 +177,22 @@ class Batches:
     def add(self, *, agent: str, origin: str, session_id: str, cwd: str,
             timestamp: str, role: str, text: str,
             session_uid: str | None = None,
-            aliases: tuple | list = ()) -> None:
+            aliases: tuple | list = (),
+            extra: dict | None = None) -> str:
+        """Queue one record (redacted here) and return its hash, whether it
+        was new or already sent. ``extra`` adds fields to the wire line (a
+        hub ignores fields it does not know); it never replaces a core one,
+        and its string values are redacted like the text."""
         # Unconditional: this is the one place text leaves the machine.
         text, found = redact.redact(text)
         digest = record_hash(agent, origin, session_id, timestamp, role, text)
         if digest in self.seen or self.state.known(digest):
-            return
+            return digest
         self.seen.add(digest)
         self.new += 1
         self.redacted.update(found)
         if self.dry_run:
-            return
+            return digest
         line = {
             "v": FORMAT, "machine": self.machine, "agent": agent,
             "origin": origin, "session_id": session_id, "cwd": cwd,
@@ -188,15 +202,19 @@ class Batches:
         }
         if aliases:
             line["aliases"] = [list(pair) for pair in aliases]
+        for key, value in (extra or {}).items():
+            if key not in line:
+                line[key] = _redact_values(value, self.redacted)
         self.pending.append((digest, json.dumps(line, ensure_ascii=False)))
         if len(self.pending) >= BATCH_LINES:
             self.flush()
+        return digest
 
     def flush(self) -> None:
         if not self.pending:
             return
         self._seq += 1
-        name = f"{self._stamp}-{self._seq:04d}.jsonl"
+        name = f"{self.prefix}{self._stamp}-{self._seq:04d}.jsonl"
         final = self.outbox / name
         part = self.outbox / f".{name}.part"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -210,6 +228,19 @@ class Batches:
         self.state.queue([d for d, _ in self.pending], name)
         self.files += 1
         self.pending = []
+
+
+def _redact_values(value, counter: Counter):
+    """Redact every string inside a JSON-shaped value."""
+    if isinstance(value, str):
+        clean, found = redact.redact(value)
+        counter.update(found)
+        return clean
+    if isinstance(value, dict):
+        return {k: _redact_values(v, counter) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_values(v, counter) for v in value]
+    return value
 
 
 def _outbox() -> Path:

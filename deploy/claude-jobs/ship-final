@@ -1,0 +1,39 @@
+#!/bin/bash
+# /usr/local/lib/claude-jobs/ship-final <job_id>
+#
+# The claude -p job runner calls this, as the claude-jobs user, before it
+# marks a job done. Exit 0 means the hub has confirmed every record of the
+# job (rsync removes a batch only after the hub wrote it and its checksum
+# matched); anything else means "not confirmed, don't mark done":
+#   1  upload failed or a record is unconfirmed (batches stay queued)
+#   2  bad job id, missing job dir/job.json, or no hub configured
+#   3  another ship held the lock past the wait
+#
+# Install (root): install -o root -g root -m 0755 ship-final /usr/local/lib/claude-jobs/ship-final
+# It reads only AGENT_HISTORY_* lines from the job user's env file and never
+# executes that file.
+set -u
+
+job="${1:-}"
+if [[ ! "$job" =~ ^cj_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{6}$ ]]; then
+    echo "usage: ship-final cj_<yyyymmddThhmmssZ>_<6 hex>" >&2
+    exit 2
+fi
+
+home="${HOME:-}"
+if [[ -z "$home" ]] && command -v getent >/dev/null 2>&1; then
+    home="$(getent passwd "$(id -un)" | cut -d: -f6)"
+fi
+env_file="${AGENT_HISTORY_ENV_FILE:-$home/.config/agent-history/env}"
+if [[ ! -r "$env_file" ]]; then
+    echo "ship-final: $env_file is missing or unreadable" >&2
+    exit 2
+fi
+while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^(AGENT_HISTORY_[A-Z_]+)=(.*)$ ]]; then
+        export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    fi
+done < "$env_file"
+
+bin="${AGENT_HISTORY_BIN:-$home/.local/bin/agent-history}"
+exec "$bin" ship-jobs --final "$job" --wait "${SHIP_FINAL_WAIT:-300}"
