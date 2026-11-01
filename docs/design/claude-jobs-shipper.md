@@ -12,9 +12,19 @@ the job back without the job summarising itself:
 - `history_show(session="<job id>")` reads it, oldest first.
 
 Both are the existing Router tools (`history__history_recall`,
-`history__history_show`), with their current argument shapes. **The hub needs
-no code change and no redeploy for this piece**: the shipper produces ordinary
-v1 inbox records.
+`history__history_show`), with their current argument shapes. Reading a job
+back by job id needs no hub change: the shipper produces ordinary v1 inbox
+records. Looking a job up by its **Claude session uuid** with `history_show`
+needs one small hub change (a new alias kind, below), so it works after the
+hub is upgraded.
+
+Two gates, both from Dennis (Nov 1):
+
+1. **Arrival** (`ship-final`, run by the runner as claude-jobs): exit 0 once
+   every batch of the job has reached the hub.
+2. **Indexing** (`confirm-indexed`, run on Clamps' side, never as
+   claude-jobs): exit 0 once the hub has indexed the job, i.e. the header and
+   every session are findable by job id.
 
 ## Shape: the Clamps pattern, plus a job wrapper
 
@@ -82,13 +92,12 @@ object, which current hubs ignore:
 
 Three choices make read-back work on the hub that is live today:
 
-1. **`session_id` is the job id.** The hub registers it as the session's
-   `source` alias, so `history_show(session="<job id>")` resolves directly
-   (no search step). The Claude session id is not lost: it is in the header
-   record's text, so `history_recall("<claude session id>", mode="text")`
-   finds the job too. One job is one conversation in the index, side chains
-   included. A Boat VM's transcripts form their own conversation,
-   `<job id>/vm/<vm id>` (piece B).
+1. **`session_id` is the job id**, used only as the hub's unique key for the
+   job. The hub registers it as the session's `source` alias, so
+   `history_show(session="<job id>")` resolves directly (no search step). One
+   job is one conversation in the index, side chains included. A Boat VM's
+   transcripts form their own conversation, `<job id>/vm/<vm id>` (piece B).
+   **The real Claude Code session uuid travels with every record** (below).
 2. **`cwd` contains the job id.** The runbook's parent filters recall with
    `cwd=<job id>`. When the session's real cwd (the job's worktree) already
    contains the job id it is kept; otherwise the job directory
@@ -100,6 +109,24 @@ Three choices make read-back work on the hub that is live today:
    task key, repo, branch, status, the Claude session ids, any VM ids and the
    quoted ask. A status change produces a new header record (append-only).
    The final ship adds a `[claude-jobs final]` seal record (below).
+
+**The Claude Code session uuid.** Every record carries the uuid of the
+Claude session it came from as a structured field, `claude_session_id`, and
+as a link alias `("claude", <uuid>)`. Header and seal records carry
+`claude_session_ids` (all of the job's sessions) and one alias per uuid. The
+uuids come from the `session_id` on each `transcript.jsonl` line, the session
+file names, and `job.json`'s `session_id` / `claude_session_ids`.
+
+- `history_recall("<uuid>", mode="text")` finds the job on any hub: the
+  header text lists the uuids.
+- `history_show(session="<uuid>")` resolves on a hub that knows the alias
+  kind `claude` (this PR adds it to `sessions.ALIAS_KINDS`). An older hub
+  drops the alias it doesn't know, so this one lookup needs the **hub
+  upgrade** (Dennis's steps). `claude` is a pointer, not proof that two
+  sessions are one: it never merges sessions, and the first session to claim
+  a uuid keeps it.
+- `history_show` and `history_recall` results include `claude_session_ids`
+  for the session when the hub knows them.
 
 `transcript.jsonl` lines carry no timestamps. Their records get a stable
 synthetic one: the job's start time (from `job.json`, else the stamp inside
@@ -142,12 +169,69 @@ hash of the job from the sources as they stand and requires all of them,
 plus the seal's, to be in the shipped set. Exit 0 needs all three: no upload
 error, nothing of this job left in the outbox, every hash shipped.
 
-This is a transport confirmation, not an index confirmation. The key is
-upload-only, so the job user cannot read the hub back; indexing follows
-within about a minute (the `.path` unit fires on arrival). The seal record
-makes completeness checkable on the hub side: it states the record count and
-a digest of the source files, and whether `transcript.jsonl` ended with a
-`result` line.
+This is the arrival gate. The key is upload-only, so the job user cannot
+read the hub back; indexing follows within about a minute (the `.path` unit
+fires on arrival) and is confirmed separately by `confirm-indexed`. The seal
+record makes completeness checkable on the hub side: it lists every
+conversation of the job (`Sessions:`) and every Claude session uuid
+(`Claude sessions:`), and states the record count, a digest of the source
+files, and whether `transcript.jsonl` ended with a `result` line.
+
+## The index gate: `confirm-indexed --job <job_id>`
+
+```
+agent-history confirm-indexed --job <job_id> [--json] [--receipt FILE]
+  0  indexed: the header, the seal and every session are findable by job id
+  1  not yet, or partial (the JSON and the last line say what is missing)
+  2  config or credential error (no hub configured, key refused, tenant refused)
+```
+
+It runs where the runner's index confirmer runs: inside clamps-bridge, as
+Clamps (`ops_a0dc6f0c`), once a minute for up to 15 minutes after
+`ship-final`. **Never as claude-jobs**: jobs run arbitrary code in auto mode,
+and a read credential there would expose all of Dennis's history to every
+job. claude-jobs keeps only its upload-only key.
+
+**Read path: Clamps' existing read-only ssh key.** Clamps already reads the
+hub through `AGENT_HISTORY_REMOTE` and a key pinned in `authorized_keys` to
+`command="… agent-history serve-ssh --tenants dennis",restrict`. `serve-ssh`
+answers only `search` and `show`, runs them in-process (never a shell), and
+the tenant list is fixed by the forced command, so the client cannot widen
+it. Why this one:
+
+- It exists and is in daily use (Clamps' `ah-search`), so there is no new
+  secret, key, token or listener, and nothing new on claude-jobs.
+- It runs the same functions the MCP tools run (`search.search_rows` for
+  `history_recall`, `show.rows_for` for `history_show`), so "findable with
+  history_recall / history_show" is tested literally, against the tenant's
+  own index.
+- The alternative, a bearer token for the hub's MCP server in Clamps' env,
+  would be a second read credential with the same reach, and a new secret to
+  rotate. A forced command that only answers index status would be narrower,
+  but Clamps already holds full read access through this key, so a narrower
+  key would protect nothing.
+
+With no `AGENT_HISTORY_REMOTE`, `confirm-indexed` reads the local index
+(used on the hub itself as `ahub`, and by the tests).
+
+**What it checks**, all by job id:
+
+| check | how |
+|---|---|
+| header | `search <job id> --mode text --cwd <job id>` returns `[claude-jobs job] <job id>` |
+| seal | the same search returns `[claude-jobs final] <job id>` (the final batch is indexed) |
+| job session | `show <job id>` returns rows filed under the job id |
+| every VM session in the latest seal | `show <job id>/vm/<vm id>` returns rows, and the VM header is found |
+| every Claude uuid in the seal | `search <uuid> --mode text` returns a hit in the job (reported, and gated) |
+| uuid lookup by `show <uuid>` | reported as `claude_lookup`, not gated, because it needs the hub upgrade |
+
+The latest seal (newest timestamp) defines "every session", so a VM exported
+after the first final ship is included once its own seal is indexed.
+
+`--json` prints `{"job_id", "state": "indexed" | "pending" | "partial" |
+"error", "checked_at", "sessions", "claude_session_ids", "checks",
+"missing", "claude_lookup"}`. `--receipt FILE` also writes that JSON
+atomically, for piece B's deletion gate.
 
 `ship-final` waits for the lock (a timer run may be mid-upload) instead of
 skipping like the timer does, and retries an upload twice with a short
@@ -166,6 +250,8 @@ scanner floods before.
 | malformed `job.json` or job id that doesn't match its directory | that job is skipped with a warning; `--final` exits 2 | fix the runner |
 | timer and `ship-final` overlap | `ship-final` waits for the lock | none needed |
 | old job dirs pile up | each run re-reads them; already-shipped hashes are skipped | prune job dirs after the hub has them |
+| arrived but not indexed (Ollama down, indexer stuck) | `confirm-indexed` exits 1 | the runner retries for 15 min, then alerts on Telegram |
+| Clamps' read key refused or no hub configured | `confirm-indexed` exits 2 | the runner alerts at once |
 
 ## How a parent agent reads a job back
 
@@ -178,6 +264,11 @@ history_show(session="cj_20261101T120000Z_a1b2c3", limit=50)
     around=<timestamp> to page)
 history_show(session="cj_20261101T120000Z_a1b2c3/vm/bx_abc123")
   → one Boat VM's conversation (piece B)
+```
+
+```
+history_recall(query="5f2b8c1e-…", mode="text")      → the job, by its Claude session uuid
+history_show(session="5f2b8c1e-…")                   → the same job (after the hub upgrade)
 ```
 
 `machine="claude-jobs"` narrows any recall to job transcripts. Don't use
@@ -196,5 +287,10 @@ hits.
    `deploy/claude-jobs/`.
 3. Root: install `deploy/claude-jobs/ship-final` as
    `/usr/local/lib/claude-jobs/ship-final` (root-owned, 0755).
+4. Clamps (`ops_a0dc6f0c`): upgrade its agent-history to a version with
+   `confirm-indexed`; the hub settings it already uses for `ah-search`
+   (`AGENT_HISTORY_REMOTE`, `AGENT_HISTORY_REMOTE_KEY`) are all it needs.
+5. Hub (for uuid lookup with `history_show` only): upgrade agent-history so
+   the indexer knows the `claude` alias kind.
 
 The exact commands are in `deploy/claude-jobs/README.md`.
