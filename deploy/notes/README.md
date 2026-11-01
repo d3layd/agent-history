@@ -27,8 +27,12 @@ picks notes up.
 
 ## A machine that writes notes (MSI, claude-jobs, ...)
 
+The summary is written by a model by default (`claude -p --model haiku`,
+the user's own Claude login; `ANTHROPIC_API_KEY` is stripped from the call).
+Check the login works for that user first:
+
 ```bash
-echo 'AGENT_HISTORY_NOTES_SUMMARIZER=last-message' >> ~/.config/agent-history/env
+claude -p --model haiku --max-turns 1 --no-session-persistence --tools "" "reply OK"
 cp agent-history-notes-sweep.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now agent-history-notes-sweep.timer
@@ -49,6 +53,6 @@ the background:
 ## Check
 
 ```bash
-agent-history notes sweep --dry-run --summarizer last-message
+agent-history notes sweep --dry-run
 agent-history notes search "what was decided" --mode text
 ```

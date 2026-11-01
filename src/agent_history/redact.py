@@ -38,6 +38,11 @@ _PATTERNS: list[tuple[str, re.Pattern[str], int]] = [
     ("stripe_key", re.compile(
         r"\b(?:(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{20,})"), 0),
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}"), 0),
+    # 1Password service-account tokens: `ops_` + a long base64url body. The
+    # length floor keeps names like the Linux user `ops_a0dc6f0c` intact.
+    ("onepassword_token", re.compile(r"\bops_[A-Za-z0-9+/=_-]{40,}"), 0),
+    # Scribe agent keys.
+    ("scribe_key", re.compile(r"\bscrb_agt_[A-Za-z0-9_-]{16,}"), 0),
     ("jwt", re.compile(
         r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), 0),
     ("bearer", re.compile(

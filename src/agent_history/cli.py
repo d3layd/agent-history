@@ -117,12 +117,23 @@ def _build_parser() -> argparse.ArgumentParser:
     nsweep = nts_sub.add_parser("sweep", help="note sessions that ended or went idle")
     nsweep.add_argument("--idle-minutes", type=float, default=5.0, dest="idle_minutes")
     nsweep.add_argument("--summarizer",
-                        help="command reading a JSON span on stdin, printing "
-                             "{title, summary, ...}; or last-message "
-                             "(default: $AGENT_HISTORY_NOTES_SUMMARIZER)")
+                        help="default: claude (a claude -p call with a small model, "
+                             "the machine's Claude login, never ANTHROPIC_API_KEY); "
+                             "or a command reading a JSON span on stdin and printing "
+                             "{title, summary, ...}. A failed summary falls back to "
+                             "first prompt + last message, marked fallback")
     nsweep.add_argument("--session", help="note this session now (session end)")
     nsweep.add_argument("--dry-run", action="store_true", dest="dry_run")
     nts_sub.add_parser("ship", help="upload queued notes to the hub")
+    nscrub = nts_sub.add_parser(
+        "scrub", help="admin only: replace a leaked secret in one note (and its "
+                      "search index), with an audit record that never holds the secret")
+    nscrub.add_argument("note_id")
+    nscrub.add_argument("--pattern", required=True,
+                        help="the leaked text; '-' reads it from stdin (keeps it "
+                             "out of ps and shell history)")
+    nscrub.add_argument("--reason", required=True, help="why, for the audit trail")
+    nts_sub.add_parser("audit", help="list the notes audit trail (scrubs)")
     nts_sub.add_parser("index", help="hub: index notes waiting in the inbox")
     nts_sub.add_parser("hook", help="Claude Code SessionEnd hook: sweep that "
                                     "session in the background")
@@ -552,6 +563,23 @@ def _cmd_notes(args: argparse.Namespace) -> int:
                            session=args.session, dry_run=args.dry_run)
     if action == "ship":
         return notes.ship_outbox()
+    if action == "scrub":
+        pattern = sys.stdin.read().rstrip("\n") if args.pattern == "-" else args.pattern
+        try:
+            done = notes.scrub(args.note_id, pattern, args.reason)
+        except notes.NoteError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"{done['note_id']}: {done['replacements']} replacement(s) in "
+              f"{', '.join(done['fields'])}; {done['archive_files']} archive file(s) "
+              f"rewritten; audit record added")
+        return 0
+    if action == "audit":
+        for entry in notes.audit_log():
+            print(f"{entry['at']}  {entry['action']}  {entry['note_id']}  by "
+                  f"{entry['actor']}  ({entry['replacements']} in "
+                  f"{', '.join(entry['fields'])})  {entry['reason']}")
+        return 0
     if action == "index":
         return notes.index_inbox()
     if action == "hook":

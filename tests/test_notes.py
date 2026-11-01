@@ -10,6 +10,7 @@ import io
 import json
 import shutil
 import sqlite3
+import subprocess
 import sys
 import types
 
@@ -258,6 +259,34 @@ def test_an_unreachable_hub_keeps_notes_queued(landing, monkeypatch):
 
 # -------------------------------------------------------------------- sweep
 
+@pytest.fixture
+def model(monkeypatch):
+    """Stub the `claude -p` call. Records each call; replies with a summary
+    built from the whole span (so tests can tell it from the fallback)."""
+    class Calls(list):
+        reply, is_error, code = None, False, 0
+
+    calls = Calls()
+    real_run = notes.subprocess.run
+
+    def fake_run(argv, **kw):
+        if argv[0] != "claude":
+            return real_run(argv, **kw)
+        span = json.loads(kw["input"])
+        calls.append({"argv": argv, "env": kw.get("env"), "span": span})
+        texts = [m["text"] for m in span["messages"]]
+        reply = {"title": "Model: " + texts[0][:60],
+                 "summary": "Across the span: " + " / ".join(texts),
+                 "decisions": [], "findings": [], "links": []}
+        if calls.reply is not None:
+            reply = calls.reply
+        envelope = {"type": "result", "subtype": "success", "is_error": calls.is_error,
+                    "result": reply if isinstance(reply, str) else json.dumps(reply)}
+        return subprocess.CompletedProcess(argv, calls.code, json.dumps(envelope), "")
+
+    monkeypatch.setattr(notes.subprocess, "run", fake_run)
+    return calls
+
 def session(transcripts, *texts, start_minute=0, name="s1", session_id="sess-1"):
     rows = []
     for n, text in enumerate(texts):
@@ -267,52 +296,56 @@ def session(transcripts, *texts, start_minute=0, name="s1", session_id="sess-1")
     return transcripts("proj", name, rows)
 
 
-def test_sweep_notes_an_idle_session_once(transcripts, fake_embed):
+def test_sweep_notes_an_idle_session_once(transcripts, fake_embed, model):
     session(transcripts, "Fix the flaky upload test please",
             "Done: the retry window was too short; raised it to 30s.")
-    assert notes.sweep(summarizer="last-message", now=LATER) == 0
+    assert notes.sweep(now=LATER) == 0
     (hit,) = notes.search("retry window", mode="text")
-    assert hit["title"] == "Fix the flaky upload test please"
+    assert hit["title"] == "Model: Fix the flaky upload test please"
     assert hit["source"] == {"kind": "claude-code", "machine": "testbox",
                              "session_id": "sess-1"}
     assert hit["span"] == {"start": "2026-01-01T00:00:00Z", "end": "2026-01-01T00:01:00Z"}
-    assert hit["author"] == "sweep:last-message"
-    assert notes.sweep(summarizer="last-message", now=LATER) == 0
+    assert hit["author"] == "sweep:claude"
+    (call,) = model
+    assert call["argv"][:2] == ["claude", "-p"]
+    for flag in ("--model", "haiku", "--no-session-persistence", "--max-turns", "--tools"):
+        assert flag in call["argv"]
+    assert notes.sweep(now=LATER) == 0
     assert len(notes.search("retry window flaky upload", mode="text")) == 1
 
 
-def test_an_active_session_waits_unless_it_ended(transcripts, fake_embed):
+def test_an_active_session_waits_unless_it_ended(transcripts, fake_embed, model):
     session(transcripts, "Still working on the migration plan", "Half way through it.")
     soon = datetime.datetime(2026, 1, 1, 0, 3, tzinfo=datetime.timezone.utc)
-    notes.sweep(summarizer="last-message", now=soon, idle_minutes=5)
+    notes.sweep(now=soon, idle_minutes=5)
     assert not notes.search("migration plan", mode="text")
-    notes.sweep(summarizer="last-message", now=soon, session="sess-1")  # SessionEnd
+    notes.sweep(now=soon, session="sess-1")  # SessionEnd
     assert notes.search("migration plan", mode="text")
 
 
-def test_a_resumed_session_gets_a_note_for_only_what_is_new(transcripts, fake_embed):
+def test_a_resumed_session_gets_a_note_for_only_what_is_new(transcripts, fake_embed, model):
     path = session(transcripts, "Plan the Boat export", "Plan written.")
-    notes.sweep(summarizer="last-message", now=LATER)
+    notes.sweep(now=LATER)
     with path.open("a") as fh:
         for n, (role, text) in enumerate([("user", "Resume: now ship it to the hub"),
                                           ("assistant", "Shipped and confirmed.")]):
             fh.write(json.dumps(msg(role, text, timestamp=f"2026-01-01T00:3{n}:00Z")) + "\n")
-    notes.sweep(summarizer="last-message", now=LATER)
+    notes.sweep(now=LATER)
     hits = notes.search("ship hub confirmed resume", mode="text")
-    resumed = [h for h in hits if h["title"].startswith("Resume")]
+    resumed = [h for h in hits if h["title"].startswith("Model: Resume")]
     assert len(resumed) == 1
     assert resumed[0]["span"] == {"start": "2026-01-01T00:30:00Z",
                                   "end": "2026-01-01T00:31:00Z"}
 
 
-def test_sweep_links_a_claude_p_job(transcripts, fake_embed, tmp_path, monkeypatch):
+def test_sweep_links_a_claude_p_job(transcripts, fake_embed, tmp_path, monkeypatch, model):
     jobs = tmp_path / "jobs" / JOB
     jobs.mkdir(parents=True)
     (jobs / "job.json").write_text(json.dumps({"job_id": JOB}))
     (jobs / "transcript.jsonl").write_text(json.dumps({"type": "system", "session_id": "sess-1"}) + "\n")
     monkeypatch.setenv("AGENT_HISTORY_JOBS_DIR", str(tmp_path / "jobs"))
     session(transcripts, "Job ask: tidy the README", "Opened draft PR #7 with the README tidy-up.")
-    notes.sweep(summarizer="last-message", now=LATER)
+    notes.sweep(now=LATER)
     (hit,) = notes.search("draft PR", mode="text")
     assert hit["source"]["job_id"] == JOB
     assert hit["show"]["session"] == JOB
@@ -336,22 +369,87 @@ def test_an_external_summarizer_sees_only_redacted_text(transcripts, fake_embed,
     assert "rotate quarterly" in hit["excerpt"]
 
 
-def test_a_failing_summarizer_writes_nothing_and_retries_later(transcripts, fake_embed, tmp_path):
-    session(transcripts, "Something worth noting today", "Indeed it was.")
+def test_a_failing_external_summarizer_falls_back_and_is_marked(transcripts, fake_embed):
+    session(transcripts, "Something worth noting today", "Indeed it was, and here is why.")
     bad = f"{sys.executable} -c \"import sys; sys.exit(3)\""
     assert notes.sweep(summarizer=bad, now=LATER) == 1
-    assert not notes.search("worth noting", mode="text")
-    assert notes.sweep(summarizer="last-message", now=LATER) == 0
-    assert notes.search("worth noting", mode="text")
+    (hit,) = notes.search("worth noting", mode="text")
+    assert hit["author"] == "sweep:fallback"
+    assert "Summary: fallback" in hit["excerpt"]
+    assert notes.sweep(summarizer=bad, now=LATER) == 0     # state advanced: nothing new
 
 
-def test_sweep_needs_a_summarizer(transcripts):
-    assert notes.sweep(now=LATER) == 2
+def test_last_message_is_only_a_fallback_now(transcripts):
+    assert notes.sweep(summarizer="last-message", now=LATER) == 2
 
 
-def test_sweep_dry_run_writes_nothing(transcripts, capsys):
+def test_the_model_never_sees_the_api_key_or_raw_secrets(transcripts, fake_embed, model,
+                                                         monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "x" * 40)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "subscription-token-for-the-test")
+    session(transcripts, f"I pasted {GH} by mistake, rotate it",
+            "Rotated it and updated the deploy secret.")
+    assert notes.sweep(now=LATER) == 0
+    (call,) = model
+    assert "ANTHROPIC_API_KEY" not in call["env"]
+    assert call["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "subscription-token-for-the-test"
+    assert GH not in json.dumps(call["span"])
+
+
+def test_model_output_is_redacted_again(transcripts, fake_embed, model):
+    model.reply = {"title": "Leak", "summary": f"the model echoed {GH} back"}
+    session(transcripts, "Talk about the deploy token handling", "We moved it to the vault.")
+    notes.sweep(now=LATER)
+    db, _ = notes.open_store(write=False)
+    try:
+        assert GH not in json.dumps(db.execute("SELECT note, text FROM notes").fetchall())
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("failure", ["exit", "is_error", "not_json", "missing"])
+def test_a_failed_model_call_writes_a_marked_fallback(transcripts, fake_embed, model,
+                                                      monkeypatch, failure):
+    if failure == "exit":
+        model.code = 1
+    elif failure == "is_error":
+        model.is_error = True
+    elif failure == "not_json":
+        model.reply = "Sure! Here is a summary of the session in prose."
+    else:
+        def missing(*a, **k):
+            raise FileNotFoundError("claude")
+        monkeypatch.setattr(notes.subprocess, "run", missing)
+    session(transcripts, "Plan the notes rollout for the fleet", "Rolled out to claude-jobs first.")
+    assert notes.sweep(now=LATER) == 1
+    (hit,) = notes.search("notes rollout", mode="text")
+    assert hit["author"] == "sweep:fallback"
+    assert hit["title"] == "Plan the notes rollout for the fleet"
+    db, _ = notes.open_store(write=False)
+    try:
+        (stored,) = db.execute("SELECT note FROM notes").fetchone()
+    finally:
+        db.close()
+    assert json.loads(stored)["fallback"] is True
+
+
+def test_a_fenced_model_reply_is_accepted(transcripts, fake_embed, model):
+    model.reply = '```json\n{"title": "Fenced", "summary": "a fenced reply"}\n```'
+    session(transcripts, "A session with a fenced reply", "Answered in a code block.")
+    assert notes.sweep(now=LATER) == 0
+    assert notes.search("fenced reply", mode="text")[0]["title"] == "Fenced"
+
+
+def test_the_summarizers_own_sessions_are_skipped(transcripts, fake_embed, model):
+    session(transcripts, notes.SUMMARIZER_MARK + " Summarize the conversation span",
+            '{"title": "x", "summary": "a reply from the summarizer"}')
+    assert notes.sweep(now=LATER) == 0
+    assert not model
+
+
+def test_sweep_dry_run_writes_nothing(transcripts, capsys, model):
     session(transcripts, "A session to preview", "Previewed.")
-    assert notes.sweep(summarizer="last-message", now=LATER, dry_run=True) == 0
+    assert notes.sweep(now=LATER, dry_run=True) == 0
     assert "would note sess-1" in capsys.readouterr().out
     assert not notes.state_path().exists() and not notes.db_path().exists()
 
@@ -389,3 +487,104 @@ def test_purge_and_reindex_do_not_reach_notes(fake_embed, transcripts):
         index.run()
         index.run(reindex=True, force=True)
     assert notes.search("survives a reindex", mode="text")
+
+
+# -------------------------------------------------------------------- scrub
+
+LEAK = "".join(["hunter2", "-prod-db-", "7731"])
+
+
+def leaked_note(**kw):
+    note = notes.build(title=f"DB creds {LEAK}", summary=f"The password {LEAK} was pasted.",
+                       decisions=[f"rotate {LEAK}"], source=code_source(), **kw)
+    notes.save(note)
+    return note
+
+
+def test_scrub_replaces_the_secret_in_the_note_and_its_index(fake_embed):
+    note = leaked_note()
+    assert notes.search(LEAK, mode="text")
+    done = notes.scrub(note["note_id"], LEAK, "a DB password was pasted into a note")
+    assert done["replacements"] >= 3 and set(done["fields"]) == {"note", "text", "title"}
+    assert LEAK not in json.dumps(notes.search(LEAK, mode="text"))
+    (hit,) = notes.search("password pasted", mode="text")
+    assert notes.SCRUB_MARKER in hit["excerpt"] and LEAK not in json.dumps(hit)
+    db, _ = notes.open_store(write=False)
+    try:
+        assert LEAK not in json.dumps(db.execute(
+            "SELECT title, text, note FROM notes").fetchall())
+        assert not db.execute("SELECT * FROM scrub_gate").fetchall()
+    finally:
+        db.close()
+
+
+def test_scrub_writes_an_audit_record_without_the_secret(fake_embed, monkeypatch):
+    monkeypatch.setenv("SUDO_USER", "dennis")
+    note = leaked_note()
+    notes.scrub(note["note_id"], LEAK, "pasted DB password")
+    (entry,) = notes.audit_log()
+    assert entry["actor"] == "dennis" and entry["action"] == "scrub"
+    assert entry["note_id"] == note["note_id"] and entry["reason"] == "pasted DB password"
+    assert entry["replacements"] >= 3
+    assert LEAK not in json.dumps(entry)
+    db, _ = notes.open_store(write=True)
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            db.execute("DELETE FROM notes_audit")
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            db.execute("UPDATE notes_audit SET reason = 'x'")
+    finally:
+        db.close()
+
+
+def test_append_only_still_holds_after_a_scrub(fake_embed):
+    note = leaked_note()
+    notes.scrub(note["note_id"], LEAK, "pasted DB password")
+    db, _ = notes.open_store(write=True)
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            db.execute("UPDATE notes SET title = 'changed'")
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            db.execute("DELETE FROM notes")
+        # even through the gate, identity and source never change
+        db.execute("INSERT INTO scrub_gate(note_id) VALUES (?)", (note["note_id"],))
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            db.execute("UPDATE notes SET source = '{}' WHERE note_id = ?", (note["note_id"],))
+        db.rollback()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("pattern,reason,why", [
+    ("not-in-the-note", "a reason", "does not occur"),
+    (LEAK, f"leaked {LEAK}", "contains the secret"),
+    ("abc", "a reason", "at least 4"),
+])
+def test_scrub_refuses_bad_requests(fake_embed, pattern, reason, why):
+    note = leaked_note()
+    with pytest.raises(notes.NoteError, match=why):
+        notes.scrub(note["note_id"], pattern, reason)
+    assert not notes.audit_log()
+
+
+def test_scrub_rewrites_the_hub_archive_copy(hub_inbox, fake_embed):
+    note = notes.build(title="t", summary="clean", source=code_source())
+    note["summary"] = f"an old writer let {LEAK} through"   # bypassing redaction
+    drop(hub_inbox, "claude-jobs", note)
+    notes.index_inbox()
+    archived = next((hub_inbox / ".processed" / "claude-jobs" / "notes").glob("*.jsonl"))
+    assert LEAK in archived.read_text()
+    assert notes.scrub(note["note_id"], LEAK, "leaked by an old writer")["archive_files"] == 1
+    assert LEAK not in archived.read_text()
+    assert notes.parse(archived.read_text().strip()) is not None
+
+
+def test_cli_scrub_reads_the_pattern_from_stdin(fake_embed, monkeypatch, capsys):
+    note = leaked_note()
+    monkeypatch.setattr(sys, "stdin", io.StringIO(LEAK + "\n"))
+    assert cli.main(["notes", "scrub", note["note_id"], "--pattern", "-",
+                     "--reason", "pasted DB password"]) == 0
+    assert "audit record added" in capsys.readouterr().out
+    assert cli.main(["notes", "audit"]) == 0
+    out = capsys.readouterr().out
+    assert note["note_id"] in out and LEAK not in out

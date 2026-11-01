@@ -20,7 +20,17 @@ they have no corresponding tags.
   + machine + job id) and is refused without it; notes are append-only
   (triggers refuse UPDATE/DELETE) and redacted at write and again on the hub.
   `notes sweep` writes a note for sessions idle 5 minutes (or at session end),
-  covering only what is new since the last note. The hub's index unit indexes
+  covering only what is new since the last note. The summary comes from
+  `claude -p --model haiku` with the machine's own Claude login (never
+  `ANTHROPIC_API_KEY`), on redacted text, with a marked fallback (first prompt
+  + last message) when the call fails.
+- `agent-history notes scrub <note_id> --pattern <text|-> --reason …`: the one
+  admin exception to append-only. Replaces a leaked secret in one note, its
+  full-text entry, embedding and archived copy, and appends an audit record
+  that never holds the secret; the triggers still block every other UPDATE
+  and DELETE. `notes audit` lists the trail.
+- `redact` catches bare 1Password service-account tokens (`ops_…`) and Scribe
+  agent keys (`scrb_agt_…`) with no `NAME=` in front. The hub's index unit indexes
   `inbox/<machine>/notes/` into the notes store.
 
 ## [0.17.0] — 2026-10-15

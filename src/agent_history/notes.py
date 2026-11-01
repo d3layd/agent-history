@@ -23,6 +23,7 @@ See docs/design/session-notes.md.
 from __future__ import annotations
 
 import datetime
+import getpass
 import hashlib
 import json
 import os
@@ -55,6 +56,21 @@ DEFAULT_IDLE_MINUTES = 5
 SUMMARIZER_TIMEOUT = 300
 MAX_SPAN_MESSAGES = 200
 MAX_MESSAGE_CHARS = 2000
+SCRUB_MARKER = "[REDACTED:scrubbed]"
+DEFAULT_SUMMARIZER = "claude"
+DEFAULT_MODEL = "haiku"
+# The summarizer's own prompt starts with this, and the sweep skips any
+# session that does, so a summary is never itself summarized.
+SUMMARIZER_MARK = "[agent-history notes summarizer]"
+SUMMARIZER_PROMPT = (
+    SUMMARIZER_MARK + " Summarize the conversation span given as JSON on stdin "
+    "(messages oldest first; secrets are already redacted). Cover what was "
+    "actually discussed and done across the whole span, not just its first or "
+    "last message. Reply with ONLY a JSON object, no prose and no code fence: "
+    '{"title": "<one line, at most 120 characters>", "summary": "<3 to 6 '
+    'sentences>", "decisions": ["<short>"], "findings": ["<short>"], '
+    '"links": ["<URLs, PRs, issues or files mentioned>"]}. Use empty lists '
+    "when there are none. Never include passwords, keys or tokens.")
 
 NOTE_ID = re.compile(r"^note-[0-9a-f]{20}$")
 JOB_ID = re.compile(r"^cj_\d{8}T\d{6}Z_[0-9a-f]{6}$")
@@ -179,8 +195,9 @@ def _now() -> str:
 def build(*, title: str, summary: str, source: dict, decisions=None, findings=None,
           links=None, span_start: str | None = None, span_end: str | None = None,
           author: str = "agent", corrects: str | None = None,
-          counter: Counter | None = None) -> dict:
-    """A validated, redacted note, ready for the wire."""
+          counter: Counter | None = None, fallback: bool = False) -> dict:
+    """A validated, redacted note, ready for the wire. ``fallback`` marks a
+    note built without a model summary (first prompt + last message)."""
     title = _clean(title, "title", MAX_TITLE, required=True)
     summary = _clean(summary, "summary", MAX_SUMMARY, required=True)
     corrects = _clean(corrects, "corrects", 40) or None
@@ -197,6 +214,7 @@ def build(*, title: str, summary: str, source: dict, decisions=None, findings=No
         "findings": _items("findings", findings),
         "links": _items("links", links),
         "corrects": corrects,
+        "fallback": bool(fallback),
     }
     return redact_note(note, counter)
 
@@ -232,6 +250,9 @@ def note_text(note: dict) -> str:
     span = note.get("span") or {}
     if span.get("start") or span.get("end"):
         lines.append(f"Span: {span.get('start') or '?'} to {span.get('end') or '?'}")
+    if note.get("fallback"):
+        lines.append("Summary: fallback (first prompt and last message; the "
+                     "model summary was unavailable)")
     lines += ["", note["summary"]]
     for heading, key in (("Decisions", "decisions"), ("Findings", "findings"),
                          ("Links", "links")):
@@ -267,6 +288,7 @@ def parse(line: str) -> dict | None:
             "findings": _items("findings", data.get("findings")),
             "links": _items("links", data.get("links")),
             "corrects": _clean(data.get("corrects"), "corrects", 40) or None,
+            "fallback": data.get("fallback") is True,
         }
     except NoteError:
         return None
@@ -316,10 +338,32 @@ CREATE TABLE IF NOT EXISTS notes (
     content_hash TEXT NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_notes_show ON notes(show_session);
-CREATE TRIGGER IF NOT EXISTS notes_append_only_update BEFORE UPDATE ON notes
+-- The one exception to append-only: `notes scrub` puts a note id here inside
+-- its own transaction, rewrites that note's text, and takes it out again.
+CREATE TABLE IF NOT EXISTS scrub_gate (note_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS notes_audit (
+    id           INTEGER PRIMARY KEY,
+    at           TEXT NOT NULL,
+    actor        TEXT NOT NULL,
+    action       TEXT NOT NULL,
+    note_id      TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    replacements INTEGER NOT NULL,
+    fields       TEXT NOT NULL
+);
+DROP TRIGGER IF EXISTS notes_append_only_update;
+CREATE TRIGGER notes_append_only_update BEFORE UPDATE ON notes
+WHEN NOT EXISTS (SELECT 1 FROM scrub_gate WHERE note_id = OLD.note_id)
+  OR NEW.note_id IS NOT OLD.note_id OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.machine IS NOT OLD.machine OR NEW.source IS NOT OLD.source
+  OR NEW.source_kind IS NOT OLD.source_kind OR NEW.content_hash IS NOT OLD.content_hash
 BEGIN SELECT RAISE(ABORT, 'notes are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS notes_append_only_delete BEFORE DELETE ON notes
 BEGIN SELECT RAISE(ABORT, 'notes are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS notes_audit_no_update BEFORE UPDATE ON notes_audit
+BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS notes_audit_no_delete BEFORE DELETE ON notes_audit
+BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
 """
 
 
@@ -710,8 +754,8 @@ def _sessions() -> dict[str, list]:
 
 
 def last_message(span: dict) -> dict:
-    """The built-in summarizer: no model. Title from the first prompt,
-    summary from the last assistant message (a claude -p job's own report)."""
+    """The fallback when the model summary fails: no model. Title from the
+    first prompt, summary from the last assistant message."""
     messages = span["messages"]
     first = next((m["text"] for m in messages if m["role"] == "user"), "")
     last = next((m["text"] for m in reversed(messages) if m["role"] == "assistant"), "")
@@ -720,13 +764,59 @@ def last_message(span: dict) -> dict:
     return {"title": title, "summary": summary or title}
 
 
+def _child_env() -> dict:
+    """The summarizer's environment: everything but ANTHROPIC_API_KEY, so a
+    model call can only use the machine's Claude login (on claude-jobs, the
+    subscription token), never the production API key."""
+    return {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+
+
+def _json_object(text: str) -> dict:
+    """The JSON object in a model's reply, tolerating a code fence."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        text = text[text.find("{"):] if "{" in text else text
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise NoteError("the model reply has no JSON object")
+    try:
+        value = json.loads(text[start:end + 1])
+    except ValueError:
+        raise NoteError("the model reply is not valid JSON") from None
+    if not isinstance(value, dict):
+        raise NoteError("the model reply is not a JSON object")
+    return value
+
+
+def claude_summary(span: dict) -> dict:
+    """The default summarizer: one `claude -p` call with a small model."""
+    binary = (config._env("AGENT_HISTORY_CLAUDE_BIN", "") or "").strip() or "claude"
+    model = (config._env("AGENT_HISTORY_NOTES_MODEL", "") or "").strip() or DEFAULT_MODEL
+    argv = [binary, "-p", SUMMARIZER_PROMPT, "--model", model, "--output-format", "json",
+            "--max-turns", "1", "--no-session-persistence", "--tools", ""]
+    done = subprocess.run(argv, input=json.dumps(span), text=True, capture_output=True,
+                          timeout=SUMMARIZER_TIMEOUT, env=_child_env())
+    if done.returncode != 0:
+        raise NoteError(f"claude exited {done.returncode}: "
+                        f"{(done.stderr or done.stdout or '').strip()[-200:]}")
+    try:
+        envelope = json.loads(done.stdout)
+    except ValueError:
+        raise NoteError("claude printed no JSON envelope") from None
+    if not isinstance(envelope, dict) or envelope.get("is_error"):
+        raise NoteError(f"claude reported an error: {str(envelope)[:200]}")
+    return _json_object(str(envelope.get("result") or ""))
+
+
 def _summarize(command: str, span: dict) -> dict:
-    if command == "last-message":
-        return last_message(span)
+    if command == DEFAULT_SUMMARIZER:
+        return claude_summary(span)
     # Windows parses a command line itself; POSIX shlex would eat backslashes.
     argv = command if config.WINDOWS else shlex.split(command)
     done = subprocess.run(argv, input=json.dumps(span), text=True,
-                          capture_output=True, timeout=SUMMARIZER_TIMEOUT)
+                          capture_output=True, timeout=SUMMARIZER_TIMEOUT,
+                          env=_child_env())
     if done.returncode != 0:
         raise NoteError(f"summarizer exited {done.returncode}: "
                         f"{(done.stderr or '').strip()[-200:]}")
@@ -744,10 +834,11 @@ def sweep(*, idle_minutes: float = DEFAULT_IDLE_MINUTES, summarizer: str | None 
           dry_run: bool = False) -> int:
     """Write a note for each session that ended (``session`` given) or went
     idle, covering only what came after its last note."""
-    summarizer = summarizer or (config._env("AGENT_HISTORY_NOTES_SUMMARIZER", "") or "").strip()
-    if not summarizer:
-        print("notes sweep: no summarizer. Set AGENT_HISTORY_NOTES_SUMMARIZER "
-              "(or --summarizer) to a command, or to last-message", file=sys.stderr)
+    summarizer = (summarizer or (config._env("AGENT_HISTORY_NOTES_SUMMARIZER", "") or "").strip()
+                  or DEFAULT_SUMMARIZER)
+    if summarizer == "last-message":
+        print("notes sweep: last-message is only the fallback now; leave "
+              "AGENT_HISTORY_NOTES_SUMMARIZER unset for the model summary", file=sys.stderr)
         return 2
     now = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = now - datetime.timedelta(minutes=idle_minutes)
@@ -762,6 +853,8 @@ def sweep(*, idle_minutes: float = DEFAULT_IDLE_MINUTES, summarizer: str | None 
             row = state.execute("SELECT last_ts FROM covered WHERE session = ?",
                                 (sid,)).fetchone()
             covered = row[0] if row else ""
+            if records[0].text.startswith(SUMMARIZER_MARK):
+                continue  # a summarizer's own call, if it was ever persisted
             fresh = [r for r in records if r.timestamp > covered]
             if not fresh:
                 continue
@@ -778,18 +871,23 @@ def sweep(*, idle_minutes: float = DEFAULT_IDLE_MINUTES, summarizer: str | None 
             if dry_run:
                 print(f"notes sweep: would note {sid} ({len(fresh)} message(s))")
                 continue
+            name = summarizer.split()[0].rsplit("/", 1)[-1]
             try:
                 summary = _summarize(summarizer, span)
                 note = build(title=summary.get("title"), summary=summary.get("summary"),
                              decisions=summary.get("decisions"),
                              findings=summary.get("findings"), links=summary.get("links"),
                              source=source, span_start=fresh[0].timestamp,
-                             span_end=fresh[-1].timestamp,
-                             author=f"sweep:{summarizer.split()[0].rsplit('/', 1)[-1]}")
+                             span_end=fresh[-1].timestamp, author=f"sweep:{name}")
             except (NoteError, subprocess.TimeoutExpired, OSError) as exc:
-                print(f"notes sweep: {sid}: no note this round ({exc})", file=sys.stderr)
+                print(f"notes sweep: {sid}: model summary failed ({exc}); "
+                      "writing a fallback note", file=sys.stderr)
                 failed += 1
-                continue
+                summary = last_message(span)
+                note = build(title=summary["title"], summary=summary["summary"],
+                             source=source, span_start=fresh[0].timestamp,
+                             span_end=fresh[-1].timestamp, author="sweep:fallback",
+                             fallback=True)
             where = save(note)
             state.execute("INSERT INTO covered(session, last_ts, note_id) VALUES (?,?,?) "
                           "ON CONFLICT(session) DO UPDATE SET last_ts = excluded.last_ts, "
@@ -802,7 +900,8 @@ def sweep(*, idle_minutes: float = DEFAULT_IDLE_MINUTES, summarizer: str | None 
         state.close()
     if not dry_run and config.hub_ingest():
         ship_outbox()  # anything left from an earlier unreachable round
-    print(f"notes sweep: {written} note(s) written" + (f", {failed} failed" if failed else ""))
+    print(f"notes sweep: {written} note(s) written"
+          + (f", {failed} from the fallback" if failed else ""))
     return 1 if failed else 0
 
 
@@ -828,3 +927,135 @@ def hook_session_end(stdin: Iterable[str] | None = None) -> int:
     except OSError:
         pass
     return 0
+
+
+# --------------------------------------------------------------------- scrub
+
+def _replace_all(value, pattern: str, counter: list[int]):
+    if isinstance(value, str):
+        counter[0] += value.count(pattern)
+        return value.replace(pattern, SCRUB_MARKER)
+    if isinstance(value, list):
+        return [_replace_all(v, pattern, counter) for v in value]
+    if isinstance(value, dict):
+        return {k: _replace_all(v, pattern, counter) for k, v in value.items()}
+    return value
+
+
+def _actor() -> str:
+    try:
+        return os.environ.get("SUDO_USER") or getpass.getuser()
+    except Exception:  # noqa: BLE001 - no passwd entry
+        return "unknown"
+
+
+def scrub(note_id: str, pattern: str, reason: str) -> dict:
+    """Replace a leaked secret in one note: its stored JSON, searchable text,
+    full-text entry and embedding, plus its raw copy in the inbox archive.
+    Appends an audit record that never contains the secret. The only write
+    path that may change a stored note (see the UPDATE trigger)."""
+    if not NOTE_ID.match(note_id or ""):
+        raise NoteError("not a note id (note-…)")
+    if not pattern or len(pattern) < 4:
+        raise NoteError("the pattern must be at least 4 characters")
+    reason = _clean(reason, "reason", 500, required=True)
+    if pattern in reason:
+        raise NoteError("the reason contains the secret; describe it instead")
+    reason = redact.redact(reason)[0]
+    if not db_path().exists():
+        raise NoteError("no notes store here")
+    db, vectors = open_store(write=True)
+    try:
+        row = db.execute("SELECT id, title, text, note FROM notes WHERE note_id = ?",
+                         (note_id,)).fetchone()
+        if row is None:
+            raise NoteError(f"no note {note_id}")
+        rowid, title, text, stored = row
+        counts = {}
+        new = {}
+        for field, value in (("title", title), ("text", text)):
+            n = [0]
+            new[field] = _replace_all(value, pattern, n)
+            counts[field] = n[0]
+        n = [0]
+        new["note"] = json.dumps(_replace_all(json.loads(stored), pattern, n),
+                                 ensure_ascii=False, sort_keys=True)
+        counts["note"] = n[0]
+        total = sum(counts.values())
+        if not total:
+            raise NoteError("the pattern does not occur in that note")
+        vector = None
+        if vectors:
+            try:
+                vector = embed.embed(new["text"])
+            except embed.EmbedError:
+                vector = None  # the old vector goes regardless; text search still works
+        with db:  # one transaction: gate, rewrite, index, ungate, audit
+            db.execute("INSERT INTO scrub_gate(note_id) VALUES (?)", (note_id,))
+            if _fts(db):
+                db.execute("INSERT INTO notes_fts(notes_fts, rowid, text) "
+                           "VALUES ('delete', ?, ?)", (rowid, text))
+            db.execute("UPDATE notes SET title = ?, text = ?, note = ? WHERE id = ?",
+                       (new["title"], new["text"], new["note"], rowid))
+            if _fts(db):
+                db.execute("INSERT INTO notes_fts(rowid, text) VALUES (?, ?)",
+                           (rowid, new["text"]))
+            if vectors:
+                db.execute("DELETE FROM vec_notes WHERE rowid = ?", (rowid,))
+                if vector is not None:
+                    db.execute("INSERT INTO vec_notes(rowid, embedding) VALUES (?, ?)",
+                               (rowid, embed.pack(vector)))
+            db.execute("DELETE FROM scrub_gate WHERE note_id = ?", (note_id,))
+            fields = sorted(k for k, v in counts.items() if v)
+            db.execute(
+                "INSERT INTO notes_audit (at, actor, action, note_id, reason, "
+                "replacements, fields) VALUES (?, ?, 'scrub', ?, ?, ?, ?)",
+                (_now(), _actor(), note_id, reason, total, json.dumps(fields)))
+    finally:
+        db.close()
+    archived = _scrub_archive(note_id, pattern)
+    return {"note_id": note_id, "replacements": total, "fields": fields,
+            "archive_files": archived, "reembedded": vector is not None}
+
+
+def _scrub_archive(note_id: str, pattern: str) -> int:
+    """Rewrite the note's raw copy under inbox/.processed/<machine>/notes/."""
+    root = config.inbox_dir()
+    if not root:
+        return 0
+    rewritten = 0
+    for path in (root / PROCESSED).glob(f"*/{NOTES_DIR}/*{note_id}.jsonl*"):
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if pattern not in body:
+            continue
+        lines = []
+        for line in body.splitlines():
+            try:
+                lines.append(json.dumps(_replace_all(json.loads(line), pattern, [0]),
+                                        ensure_ascii=False))
+            except ValueError:
+                lines.append(line.replace(pattern, SCRUB_MARKER))
+        part = path.with_name(f".{path.name}.part")
+        part.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(part, path)
+        rewritten += 1
+    return rewritten
+
+
+def audit_log() -> list[dict]:
+    if not db_path().exists():
+        return []
+    db, _ = open_store(write=False)
+    try:
+        return [{"at": at, "actor": actor, "action": action, "note_id": nid,
+                 "reason": reason, "replacements": n, "fields": json.loads(fields)}
+                for at, actor, action, nid, reason, n, fields in db.execute(
+                    "SELECT at, actor, action, note_id, reason, replacements, fields "
+                    "FROM notes_audit ORDER BY id")]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        db.close()
