@@ -239,10 +239,13 @@ def _swap_in(target: Path, pulled: Path) -> None:
     (target / "EXPORTED.json").unlink(missing_ok=True)  # stale until re-confirmed
 
 
-def index_problem(job: jobs.Job, vm: str, exported_at: str,
+def index_problem(job: jobs.Job, vm: str, copy_sha256: str,
                   receipt: Path | None = None) -> str:
     """Why the runner's index confirmation does not (yet) cover ``vm``; ""
-    when it does. The confirmation is ``confirm-indexed --json`` output."""
+    when it does. The confirmation is ``confirm-indexed --json`` output; it
+    must list the digest of this exact copy among the VM copies the hub has
+    indexed. Content, not clocks: the runner and the job write their files
+    at different times, possibly on clocks that disagree."""
     path = receipt or job.path / INDEX_RECEIPT
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -256,8 +259,9 @@ def index_problem(job: jobs.Job, vm: str, exported_at: str,
         return f"indexing is {data.get('state') or 'unknown'}"
     if job.vm_session(vm) not in (data.get("sessions") or []):
         return "the index confirmation does not cover this VM yet"
-    if str(data.get("checked_at") or "") < exported_at:
-        return "the index confirmation predates this VM's export"
+    copies = (data.get("vm_copies") or {}).get(job.vm_session(vm)) or []
+    if not copy_sha256 or copy_sha256 not in copies:
+        return "the hub has not indexed this copy of the VM yet"
     return ""
 
 
@@ -272,6 +276,7 @@ def write_receipt(job: jobs.Job, vm: str, files: dict[str, str]) -> Path:
             "exported_at": datetime.datetime.now(datetime.timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"),
             "files": files, "records": len(vm_digests(job, vm)),
+            "copy_sha256": jobs.vm_copy_digest(job, vm, jobs.vm_files(job.path / "vms" / vm)),
             "session": job.vm_session(vm),
             "confirmed": "ship-jobs --final exit 0"}
     part = receipt.with_name(".EXPORTED.json.part")
@@ -314,8 +319,8 @@ def run(job_id: str, vms: list[str], *, allow_empty: bool = False,
     safe, waiting = [], []
     for result in pulled:
         receipt = write_receipt(job, result.vm, result.files)
-        exported = json.loads(receipt.read_text(encoding="utf-8"))["exported_at"]
-        (waiting if index_problem(job, result.vm, exported, index_receipt) else safe).append(result.vm)
+        copy = json.loads(receipt.read_text(encoding="utf-8"))["copy_sha256"]
+        (waiting if index_problem(job, result.vm, copy, index_receipt) else safe).append(result.vm)
     if safe:
         print("boat-export: safe to delete: " + " ".join(safe))
     if waiting:
@@ -359,7 +364,7 @@ def check(job_id: str, vms: list[str], index_receipt: Path | None = None) -> int
             if unshipped:
                 bad.append(f"{vm}: {len(unshipped)} record(s) not confirmed shipped")
                 continue
-            problem = index_problem(job, vm, str(data.get("exported_at") or ""),
+            problem = index_problem(job, vm, str(data.get("copy_sha256") or ""),
                                     index_receipt)
             if problem:
                 waiting.append(f"{vm}: arrived; {problem}")

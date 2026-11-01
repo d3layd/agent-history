@@ -104,15 +104,17 @@ def env(tmp_path, monkeypatch):
             "job": root / JOB}
 
 
-def confirm_index(env, *vms, state="indexed", checked_at=None):
+def confirm_index(env, *vms, state="indexed", copies=None):
     """What the runner's side does after confirm-indexed --job JOB exits 0:
-    its --json result lands in the job directory."""
-    import datetime
-    stamp = checked_at or (datetime.datetime.now(datetime.timezone.utc)
-                           + datetime.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    its --json result lands in the job directory. ``copies`` defaults to the
+    digest of each VM's current copy (what the hub would have indexed)."""
+    job = jobs.load_job(env["job"])
+    if copies is None:
+        copies = {f"{JOB}/vm/{vm}": [jobs.vm_copy_digest(
+            job, vm, jobs.vm_files(env["job"] / "vms" / vm))] for vm in vms}
     (env["job"] / "index-confirmed.json").write_text(json.dumps({
-        "job_id": JOB, "state": state, "checked_at": stamp,
-        "sessions": [JOB] + [f"{JOB}/vm/{vm}" for vm in vms]}))
+        "job_id": JOB, "state": state, "checked_at": "2026-11-01T23:59:00Z",
+        "sessions": [JOB] + [f"{JOB}/vm/{vm}" for vm in vms], "vm_copies": copies}))
 
 
 def vm_lines(env, vm=VM):
@@ -260,7 +262,7 @@ def test_a_reexport_replaces_the_copy_and_ships_only_new_records(env):
                                          cwd="/home/user/storm-check")) + "\n")
     assert boat_export.run(JOB, [VM], boat=boat) == WAIT
     lines = vm_lines(env)
-    assert len(lines) == first + 1   # only the new message; the VM header is unchanged
+    assert len(lines) == first + 2   # the new message, and a VM header for the new copy
     assert "A follow-up after the VM resumed." in json.dumps(lines)
 
 
@@ -288,7 +290,8 @@ def test_cli_check_path(env, capsys):
 
 @pytest.mark.parametrize("bad", [
     {"state": "partial"},
-    {"checked_at": "2000-01-01T00:00:00Z"},     # checked before the export
+    {"copies": {f"{JOB}/vm/{VM}": ["0" * 64]}},  # the hub indexed another copy
+    {"copies": {}},                              # no indexed copy of this VM
     {"vms": ()},                                 # does not list this VM
 ])
 def test_an_index_confirmation_that_does_not_cover_the_vm_is_not_enough(env, bad):
@@ -300,9 +303,15 @@ def test_an_index_confirmation_that_does_not_cover_the_vm_is_not_enough(env, bad
 
 
 def test_a_confirmation_from_before_a_reexport_does_not_count(env):
-    env["boat"].add(VM, "stopped", ROWS)
+    home = env["boat"].add(VM, "stopped", ROWS)
     assert boat_export.run(JOB, [VM], boat=env["boat"]) == WAIT
-    confirm_index(env, VM, checked_at="2026-01-01T00:00:00Z")
+    confirm_index(env, VM)
+    assert boat_export.check(JOB, [VM]) == 0
+    f = next((home / ".claude" / "projects").rglob("*.jsonl"))
+    with f.open("a") as fh:
+        fh.write(json.dumps(session_line("assistant", "More work after the confirmation.",
+                                         "2026-11-01T23:40:00.000Z", sid=VSID)) + "\n")
+    assert boat_export.run(JOB, [VM], boat=env["boat"]) == WAIT   # new copy, old confirmation
     assert boat_export.check(JOB, [VM]) == WAIT
 
 

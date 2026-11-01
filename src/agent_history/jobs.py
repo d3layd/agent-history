@@ -373,11 +373,18 @@ def vm_records(job: Job, vm_id: str, files: list[Path]) -> list[tuple[Record, di
         if value:
             lines.append(f"{label}: {value}")
     lines.append(f"Files: {len(files)}")
+    # Binds an index confirmation to this exact copy (piece B's deletion gate).
+    lines.append(f"Copy: sha256 {vm_copy_digest(job, vm_id, files)}")
     header = Record(agent=AGENT, origin=str(job.path / "vms" / vm_id),
                     session_id=session, cwd=job.cwd(real_cwd),
                     timestamp=min(stamps) if stamps else _iso(job.started()),
                     role="job", text="\n".join(lines))
     return [_with_claude_list(extra, header, sids)] + tagged
+
+
+def vm_copy_digest(job: Job, vm_id: str, files: list[Path]) -> str:
+    """sha256 over a VM's pulled transcript files (names and content)."""
+    return _digest(files, job.path / "vms" / vm_id / "projects")
 
 
 def record_digest(record: Record) -> str:
