@@ -282,6 +282,11 @@ def batches(hub, machine="claude-ai"):
     return sorted((hub["inbox"] / "dennis" / machine).glob("*.jsonl"))
 
 
+def record_files(hub, machine="claude-ai"):
+    """history_record writes a note now (piece D), into the notes inbox."""
+    return sorted((hub["inbox"] / "dennis" / machine / "notes").glob("*.jsonl"))
+
+
 def test_record_is_redacted_and_lands_in_the_inbox(hub):
     async def call(client):
         return await client.call_tool("history_record", RECORD)
@@ -291,16 +296,20 @@ def test_record_is_redacted_and_lands_in_the_inbox(hub):
     assert out["session"] == "claude-ai-chat-0b5e1d4c-1111-4222-8333-444455556666"
     assert out["redacted"] == {"github_token": 1}
 
-    (path,) = batches(hub)
+    assert not batches(hub), "nothing goes to the transcript inbox any more"
+    (path,) = record_files(hub)
     if os.name != "nt":  # Windows has no POSIX mode bits
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     raw = path.read_text()
     assert GH not in raw and "[REDACTED:github_token]" in raw
-    line = json.loads(raw)
-    assert line["v"] == 1 and line["agent"] == "claude-ai-chat"
-    assert line["machine"] == "claude-ai" and line["cwd"] == "agent-history"
-    assert line["session_id"] == out["session"]
-    assert out["record_id"] in line["text"] and "two tokens" in line["text"]
+    from agent_history import notes
+    note = notes.parse(raw)
+    assert note["origin"] == "history_record"
+    assert note["source"] == {"kind": "claude-ai", "url": RECORD["chat_url"]}
+    assert note["record"]["session"] == out["session"]
+    assert note["record"]["project"] == "agent-history"
+    assert out["record_id"] in note["record"]["text"] and "two tokens" in note["record"]["text"]
+    assert note["note_id"] == out["note_id"] == notes.record_note_id(out["record_id"])
 
 
 def test_record_is_append_only(hub):
@@ -312,7 +321,7 @@ def test_record_is_append_only(hub):
     first, second = run_calls(hub["tokens"]["write"], call)
     assert first["record_id"] != second["record_id"]
     assert first["session"] == second["session"]  # one chat, one session
-    paths = batches(hub)
+    paths = record_files(hub)
     assert len(paths) == 2
     before = {p: p.read_bytes() for p in paths}
 
@@ -321,7 +330,7 @@ def test_record_is_append_only(hub):
 
     data(run_calls(hub["tokens"]["write"], third))
     assert all(p.read_bytes() == b for p, b in before.items())
-    assert len(batches(hub)) == 3
+    assert len(record_files(hub)) == 3
 
 
 def test_recorded_chats_are_indexed_like_shipped_records(hub, monkeypatch):
@@ -334,10 +343,12 @@ def test_recorded_chats_are_indexed_like_shipped_records(hub, monkeypatch):
 
     monkeypatch.setenv("AGENT_HISTORY_HUB", "1")
     monkeypatch.setenv("AGENT_HISTORY_INBOX", str(hub["inbox"] / "dennis"))
+    from agent_history import notes
     with config.tenant_home("dennis"):
         assert index.run() == 0
+        assert notes.index_inbox() == 0      # the hub unit runs both (trigger)
     monkeypatch.setenv("AGENT_HISTORY_INBOX", str(hub["inbox"]))
-    assert not batches(hub), "the indexer retires consumed batches"
+    assert not record_files(hub), "the notes indexer retires what it read"
 
     async def read(client):
         found = await client.call_tool("history_recall", {

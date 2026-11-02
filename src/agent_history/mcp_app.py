@@ -101,7 +101,10 @@ def build_server(gate: Gate) -> MCPServer:
             "what happened, a few sentences. decisions / findings / links: "
             "short items. chat_url: this chat's https://claude.ai/chat/... URL "
             "(records of one chat are grouped under one session). project: the "
-            "project or repo it concerns. Returns the record id."),
+            "project or repo it concerns. In Duet, also pass duet_channel_id and "
+            "duet_message_id (the message the work started from); from Claude "
+            "Code, session_id and session_machine (and job_id for a claude -p "
+            "job). Returns the record id."),
         annotations=ToolAnnotations(title="Record to history", read_only_hint=False,
                                     destructive_hint=False, idempotent_hint=False,
                                     open_world_hint=False),
@@ -116,10 +119,17 @@ def build_server(gate: Gate) -> MCPServer:
         links: list[str] | None = None,
         chat_url: str | None = None,
         project: str | None = None,
+        duet_channel_id: str | None = None,
+        duet_message_id: str | None = None,
+        session_id: str | None = None,
+        session_machine: str | None = None,
+        job_id: str | None = None,
     ) -> str:
         return run("history_record", ctx, record, title=title, summary=summary,
                    decisions=decisions, findings=findings, links=links,
-                   chat_url=chat_url, project=project)
+                   chat_url=chat_url, project=project, duet_channel_id=duet_channel_id,
+                   duet_message_id=duet_message_id, session_id=session_id,
+                   session_machine=session_machine, job_id=job_id)
 
     @server.tool(
         name="history_note",
