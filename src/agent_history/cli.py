@@ -12,7 +12,7 @@ from . import (__version__, adapters, config, embed, index, inject, scrub,
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
             "purge", "strict", "scrub", "ship", "ship-jobs", "confirm-indexed",
-            "boat-export",
+            "boat-export", "boat-archive",
             "serve-ssh", "mcp", "import", "notes"}
 
 
@@ -128,6 +128,32 @@ def _build_parser() -> argparse.ArgumentParser:
     bxp.add_argument("--boat-timeout", type=int, default=180, metavar="SECONDS",
                      help="timeout for each Boat API call (default 180)")
     bxp.add_argument("--index-receipt", metavar="FILE", dest="index_receipt",
+                     help="the runner's confirm-indexed result (default: "
+                          "<jobs>/<job_id>/index-confirmed.json)")
+
+    bxa = sub.add_parser(
+        "boat-archive", help="let job Boat VMs go only after their transcripts are "
+                             "copied and indexed (copies back first if needed; never "
+                             "deletes); --sweep: daily alert for stopped VMs whose "
+                             "transcripts were not copied")
+    bxa.add_argument("--job", metavar="JOB_ID", help="the claude -p job the VMs belong to")
+    bxa.add_argument("vms", nargs="*", metavar="VM_ID", help="Boat sandbox ids")
+    bxa.add_argument("--sweep", action="store_true",
+                     help="check every job's VMs and print one line per stopped or "
+                          "gone VM with transcripts not confirmed copied (empty output: "
+                          "nothing to report)")
+    bxa.add_argument("--json", action="store_true", dest="as_json",
+                     help="with --sweep: alerts and warnings as JSON")
+    bxa.add_argument("--no-discover", action="store_false", dest="discover",
+                     help="with --sweep: only VMs recorded in job.json or exported "
+                          "before, not Boat sandboxes named for a job")
+    bxa.add_argument("--allow-empty", action="store_true", dest="allow_empty",
+                     help="accept a VM with no transcripts")
+    bxa.add_argument("--wait", type=int, default=300, metavar="SECONDS",
+                     help="how long the copy-back's final ship waits for the ship lock")
+    bxa.add_argument("--boat-timeout", type=int, default=180, metavar="SECONDS",
+                     help="timeout for each Boat API call (default 180)")
+    bxa.add_argument("--index-receipt", metavar="FILE", dest="index_receipt",
                      help="the runner's confirm-indexed result (default: "
                           "<jobs>/<job_id>/index-confirmed.json)")
 
@@ -712,6 +738,23 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             return boat_export.run(args.job, args.vms, allow_empty=args.allow_empty,
                                    wait=args.wait, index_receipt=receipt,
                                    boat=boat_export.Boat(timeout=args.boat_timeout))
+        if args.command == "boat-archive":
+            from . import boat_archive, boat_export
+            from pathlib import Path
+            receipt = Path(args.index_receipt) if args.index_receipt else None
+            boat = boat_export.Boat(timeout=args.boat_timeout)
+            if args.sweep:
+                if args.job or args.vms:
+                    print("boat-archive: --sweep takes no --job or VM ids", file=sys.stderr)
+                    return 2
+                return boat_archive.run_sweep(as_json=args.as_json, discover=args.discover,
+                                              index_receipt=receipt, boat=boat)
+            if not args.job or not args.vms:
+                print("boat-archive: name --job JOB_ID and at least one VM id, or use "
+                      "--sweep", file=sys.stderr)
+                return 2
+            return boat_archive.run(args.job, args.vms, allow_empty=args.allow_empty,
+                                    wait=args.wait, index_receipt=receipt, boat=boat)
         if args.command == "notes":
             return _cmd_notes(args)
         if args.command == "serve-ssh":

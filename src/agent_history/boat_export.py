@@ -94,13 +94,42 @@ class Boat:
             raise BoatError("boat printed no JSON object")
         return value
 
-    def state(self, vm: str) -> str:
+    def info(self, vm: str) -> dict:
+        """``boat info --json``: the sandbox object (state, stoppedAt, name...)."""
         data = self._json(self._run("info", vm, "--json"))
-        box = data.get("sandbox") if isinstance(data.get("sandbox"), dict) else data
-        state = box.get("state")
+        return data.get("sandbox") if isinstance(data.get("sandbox"), dict) else data
+
+    def state(self, vm: str) -> str:
+        state = self.info(vm).get("state")
         if not isinstance(state, str):
             raise BoatError(f"boat info {vm}: no state")
         return state
+
+    def list_all(self) -> list[dict]:
+        """Every sandbox in every state (``boat list --all --json``)."""
+        text = self._run("list", "--all", "--json")
+        rows: list[dict] = []
+        try:
+            value = json.loads(text)
+        except ValueError:
+            value = None
+        if isinstance(value, list):
+            rows = value
+        elif isinstance(value, dict):
+            for key in ("sandboxes", "data", "items"):
+                if isinstance(value.get(key), list):
+                    rows = value[key]
+                    break
+        else:  # JSONL
+            for line in text.splitlines():
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(item, dict):
+                    rows.append(item.get("sandbox") if isinstance(item.get("sandbox"), dict)
+                                else item)
+        return [r for r in rows if isinstance(r, dict)]
 
     def resume(self, vm: str) -> None:
         self._run("resume", vm, "--json")
@@ -334,6 +363,29 @@ def run(job_id: str, vms: list[str], *, allow_empty: bool = False,
     return EXIT_AWAITING_INDEX if waiting else jobs.EXIT_OK
 
 
+def receipt_status(job: jobs.Job, vm: str, state: "ship.State",
+                   index_receipt: Path | None = None) -> tuple[int, str]:
+    """Where one VM's copy stands, without Boat: (0, ...) arrived and
+    indexed, (4, why) arrived but indexing not confirmed, (1, why) not
+    exported, changed since, or not confirmed shipped."""
+    receipt = job.path / "vms" / vm / "EXPORTED.json"
+    try:
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return jobs.EXIT_UNCONFIRMED, "no receipt (not exported)"
+    if not isinstance(data, dict) or data.get("job_id") != job.job_id or data.get("vm_id") != vm:
+        return jobs.EXIT_UNCONFIRMED, "receipt names another job or VM"
+    if local_checksums(job.path / "vms" / vm / "projects") != data.get("files"):
+        return jobs.EXIT_UNCONFIRMED, "files changed since the export"
+    unshipped = [d for d in vm_digests(job, vm) if not state.shipped(d)]
+    if unshipped:
+        return jobs.EXIT_UNCONFIRMED, f"{len(unshipped)} record(s) not confirmed shipped"
+    problem = index_problem(job, vm, str(data.get("copy_sha256") or ""), index_receipt)
+    if problem:
+        return EXIT_AWAITING_INDEX, f"arrived; {problem}"
+    return jobs.EXIT_OK, "arrived and indexed on the hub"
+
+
 def check(job_id: str, vms: list[str], index_receipt: Path | None = None) -> int:
     """Re-confirm without Boat: files unchanged, records shipped, and the
     runner's index confirmation covers the VM. 0 safe to delete, 4 arrived
@@ -348,28 +400,13 @@ def check(job_id: str, vms: list[str], index_receipt: Path | None = None) -> int
     waiting: list[str] = []
     try:
         for vm in vms:
-            receipt = job.path / "vms" / vm / "EXPORTED.json"
-            try:
-                data = json.loads(receipt.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                bad.append(f"{vm}: no receipt")
-                continue
-            if data.get("job_id") != job_id or data.get("vm_id") != vm:
-                bad.append(f"{vm}: receipt names another job or VM")
-                continue
-            if local_checksums(job.path / "vms" / vm / "projects") != data.get("files"):
-                bad.append(f"{vm}: files changed since the export")
-                continue
-            unshipped = [d for d in vm_digests(job, vm) if not state.shipped(d)]
-            if unshipped:
-                bad.append(f"{vm}: {len(unshipped)} record(s) not confirmed shipped")
-                continue
-            problem = index_problem(job, vm, str(data.get("copy_sha256") or ""),
-                                    index_receipt)
-            if problem:
-                waiting.append(f"{vm}: arrived; {problem}")
-                continue
-            print(f"boat-export: {vm}: arrived and indexed on the hub; safe to delete")
+            code, why = receipt_status(job, vm, state, index_receipt)
+            if code == jobs.EXIT_OK:
+                print(f"boat-export: {vm}: arrived and indexed on the hub; safe to delete")
+            elif code == EXIT_AWAITING_INDEX:
+                waiting.append(f"{vm}: {why}")
+            else:
+                bad.append(f"{vm}: {why}")
     finally:
         state.close()
     for line in bad + waiting:
