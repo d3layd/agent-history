@@ -578,6 +578,58 @@ templated systemd units for the hub's indexer (`agent-history-hub-index@<tenant>
 (`agent-history-mcp.service`), a user unit and timer for shipping, and
 `authorized_keys.example`.
 
+### `claude -p` jobs: `ship-jobs` and the final-ship hook
+
+A user that runs headless `claude -p` jobs (one directory per job under
+`AGENT_HISTORY_JOBS_DIR`, default `/var/lib/claude-jobs/jobs/<job_id>/` with
+`job.json` and the stream-json `transcript.jsonl`) ships with
+`agent-history ship-jobs` instead of `ship`. It sends the job's Claude Code
+session files and `transcript.jsonl` through the same upload-only key, with
+every record filed under `session_id = <job id>`, a `cwd` that contains the
+job id, a `job` object on each line (job id, owning Duet channel, Studio task
+key), batch files named `<job_id>-….jsonl`, and a header record whose text
+names all of them. A parent agent reads a job back with the hub's existing
+tools, no hub change needed:
+
+```text
+history_recall(query="cj_20261101T120000Z_a1b2c3", mode="text", cwd="cj_20261101T120000Z_a1b2c3")
+history_show(session="cj_20261101T120000Z_a1b2c3", limit=50)
+```
+
+Every record also carries the real Claude Code session uuid
+(`claude_session_id`, plus a `claude` link alias), so
+`history_recall("<uuid>", mode="text")` finds the job, and on a hub with this
+version `history_show(session="<uuid>")` resolves to it too.
+
+`agent-history ship-jobs --final <job_id>` (wrapped as
+`deploy/claude-jobs/ship-final`) is the runner's last step before a job is
+marked done: it waits for the ship lock, adds a seal record, and exits 0 only
+once rsync has confirmed every batch of the job (1 unconfirmed, 2 bad
+input/config, 3 lock busy). Indexing is confirmed separately, on the runner's
+side and never as the job user, with
+`agent-history confirm-indexed --job <job_id> [--json] [--receipt FILE]`
+(0 indexed, 1 not yet or partial, 2 config or credential error). It reads
+the hub through the existing read-only `serve-ssh` key
+(`AGENT_HISTORY_REMOTE`), or with `--local` the local index on the hub itself. Install steps: [`deploy/claude-jobs/`](deploy/claude-jobs/README.md);
+design: [`docs/design/claude-jobs-shipper.md`](docs/design/claude-jobs-shipper.md).
+
+### Boat VMs: `boat-export` before teardown
+
+A fleet job that runs Claude Code on Boat VMs keeps them stopped (paused)
+until the work is verified, then runs
+`agent-history boat-export --job <job_id> <vm_id>...`. For each VM it resumes
+a stopped VM, pulls `~/.claude/projects` with `boat scp`, checks the copy
+against the VM's own sha256 list, stops the VM again (also on failure), and
+ships the job with `ship-jobs --final`. Exit 0 means the hub confirmed every
+record arrived **and** the runner's `confirm-indexed` result
+(`<jobs>/<job_id>/index-confirmed.json`) says the VM's session is indexed, so
+the VM is safe to delete. Exit 4 means arrived, awaiting index confirmation.
+The tool never deletes a VM itself (`boat-export --check … && boat delete …`
+is the caller's step). Each VM reads back as
+its own conversation, `history_show(session="<job_id>/vm/<vm_id>")`.
+`--check` re-confirms an earlier export from its receipt without calling
+Boat. Design: [`docs/design/boat-vm-transcripts.md`](docs/design/boat-vm-transcripts.md).
+
 ### Session notes
 
 Next to raw transcripts, agent-history keeps **session notes**: short

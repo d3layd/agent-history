@@ -43,10 +43,13 @@ PSEUDO_PREFIXES = ("memory:", "doc:")
 # for the export, Cowork and teleport adapters. A fork is a different
 # conversation, so it is not an alias: see link_fork().
 ALIAS_KINDS = ("source", "uid", "bridge", "cse", "export", "cowork",
-               "teleport")
+               "teleport", "claude")
 # Kinds that are evidence of *sameness*. A raw `source` id can collide (the
 # same id on two machines is not proof), so it never merges two uids.
-IDENTITY_KINDS = frozenset(ALIAS_KINDS) - {"source"}
+# `claude` is a pointer from a real Claude Code session uuid to a session the
+# hub files under another key (a claude -p job, keyed by its job id): a
+# lookup aid, first come first served, never a reason to merge.
+IDENTITY_KINDS = frozenset(ALIAS_KINDS) - {"source", "claude"}
 BRIDGE_PREFIXES = ("cse_", "session_")
 
 SCHEMA = """

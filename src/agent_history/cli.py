@@ -11,8 +11,9 @@ from . import (__version__, adapters, config, embed, index, inject, scrub,
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub", "ship", "serve-ssh", "mcp", "import",
-            "notes"}
+            "purge", "strict", "scrub", "ship", "ship-jobs", "confirm-indexed",
+            "boat-export",
+            "serve-ssh", "mcp", "import", "notes"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -85,6 +86,50 @@ def _build_parser() -> argparse.ArgumentParser:
                      dest="backfill",
                      help="also send chunks already in the local index "
                           "(covers transcripts no longer on disk)")
+
+    sjb = sub.add_parser(
+        "ship-jobs", help="send claude -p job transcripts to the hub "
+                          "(AGENT_HISTORY_JOBS_DIR, AGENT_HISTORY_HUB_INGEST)")
+    sjb.add_argument("--final", metavar="JOB_ID",
+                     help="ship one job and exit 0 only once the hub has "
+                          "confirmed every record of it (the runner's last step)")
+    sjb.add_argument("--wait", type=int, default=300, metavar="SECONDS",
+                     help="with --final: how long to wait for another ship "
+                          "to finish (default 300)")
+    sjb.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="report what would be sent; write and upload nothing")
+
+    cix = sub.add_parser(
+        "confirm-indexed",
+        help="has the hub indexed a claude -p job? 0 yes, 1 not yet or partial, "
+             "2 config or credential error (run on Clamps' side, never as claude-jobs)")
+    cix.add_argument("--job", required=True, metavar="JOB_ID")
+    cix.add_argument("--json", action="store_true", dest="as_json")
+    cix.add_argument("--receipt", metavar="FILE",
+                     help="also write the result JSON to FILE (atomically)")
+    cix.add_argument("--tenant", help="hub tenant to read (a key that reads several)")
+    cix.add_argument("--local", action="store_true",
+                     help="read this machine's index instead (on the hub itself)")
+
+    bxp = sub.add_parser(
+        "boat-export", help="pull Boat VMs' Claude Code transcripts into a job and "
+                            "ship them; 0 safe to delete (arrived and indexed), "
+                            "4 arrived, awaiting index confirmation")
+    bxp.add_argument("--job", required=True, metavar="JOB_ID",
+                     help="the claude -p job the VMs belong to")
+    bxp.add_argument("vms", nargs="+", metavar="VM_ID", help="Boat sandbox ids")
+    bxp.add_argument("--check", action="store_true",
+                     help="re-confirm earlier exports from their receipts "
+                          "without calling Boat")
+    bxp.add_argument("--allow-empty", action="store_true", dest="allow_empty",
+                     help="accept a VM with no transcripts")
+    bxp.add_argument("--wait", type=int, default=300, metavar="SECONDS",
+                     help="how long the final ship waits for the ship lock")
+    bxp.add_argument("--boat-timeout", type=int, default=180, metavar="SECONDS",
+                     help="timeout for each Boat API call (default 180)")
+    bxp.add_argument("--index-receipt", metavar="FILE", dest="index_receipt",
+                     help="the runner's confirm-indexed result (default: "
+                          "<jobs>/<job_id>/index-confirmed.json)")
 
     nts = sub.add_parser("notes", help="session notes: summaries kept apart "
                                         "from transcripts, each linked to its source")
@@ -651,6 +696,22 @@ def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                             where=args.where, tenant=args.tenant)
         if args.command == "ship":
             return ship.run(dry_run=args.dry_run, backfill=args.backfill)
+        if args.command == "ship-jobs":
+            from . import jobs
+            return jobs.run(args.final, dry_run=args.dry_run, wait=args.wait)
+        if args.command == "confirm-indexed":
+            from . import confirm
+            return confirm.run(args.job, as_json=args.as_json, receipt=args.receipt,
+                               tenant=args.tenant, local=args.local)
+        if args.command == "boat-export":
+            from . import boat_export
+            from pathlib import Path
+            receipt = Path(args.index_receipt) if args.index_receipt else None
+            if args.check:
+                return boat_export.check(args.job, args.vms, index_receipt=receipt)
+            return boat_export.run(args.job, args.vms, allow_empty=args.allow_empty,
+                                   wait=args.wait, index_receipt=receipt,
+                                   boat=boat_export.Boat(timeout=args.boat_timeout))
         if args.command == "notes":
             return _cmd_notes(args)
         if args.command == "serve-ssh":

@@ -15,6 +15,8 @@
 command="rrsync -wo /home/ahub/inbox/dennis/pc",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-dennis-pc
 command="rrsync -wo /home/ahub/inbox/dennis/claude-rc",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-dennis-claude-rc
 command="rrsync -wo /home/ahub/inbox/dennis/clamps",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-dennis-clamps
+# claude -p jobs (agent-history ship-jobs, deploy/claude-jobs/)
+command="rrsync -wo /home/ahub/inbox/dennis/claude-jobs",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-dennis-claude-jobs
 command="rrsync -wo /home/ahub/inbox/soaring-eagle/lexi",restrict ssh-ed25519 AAAA_PLACEHOLDER ingest-eagle-lexi
 
 # --- Search keys: READ ONLY, scoped by --tenants -------------------------------

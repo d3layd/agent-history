@@ -1,0 +1,23 @@
+# systemd USER unit for the claude-jobs user: ship job transcripts to the hub.
+#   mkdir -p ~/.config/agent-history ~/.config/systemd/user
+#   cp agent-history-ship-jobs.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now agent-history-ship-jobs.timer
+#   loginctl enable-linger claude-jobs   # (root, once) so the timer runs with nobody logged in
+#
+# ~/.config/agent-history/env (mode 0600), real paths (systemd does not expand ~ here):
+#   AGENT_HISTORY_HUB_INGEST=ahub@localhost:
+#   AGENT_HISTORY_HUB_KEY=/home/claude-jobs/.ssh/agent-history-ingest
+#   AGENT_HISTORY_MACHINE=claude-jobs
+#   AGENT_HISTORY_JOBS_DIR=/var/lib/claude-jobs/jobs
+[Unit]
+Description=agent-history: ship claude -p job transcripts to the hub
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/agent-history/env
+# Records are redacted before they leave, whatever the local setting is.
+ExecStart=%h/.local/bin/agent-history ship-jobs
+# A hub that is down is not worth a red unit: batches stay in the outbox and
+# go out on the next run. ship-final, not this timer, is what a job waits on.
+SuccessExitStatus=1
+Nice=10
