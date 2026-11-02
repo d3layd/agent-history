@@ -52,7 +52,8 @@ def test_every_record_carries_the_job_in_path_and_header(env):
         assert line["session_id"] == JOB
         assert JOB in line["cwd"]
         assert line["job"] == {"job_id": JOB, "duet_channel_id": "chan_7Hq2",
-                               "studio_task_key": "ATR-31", "kind": "job"}
+                               "studio_task_key": "ATR-31", "kind": "job",
+                               "repo": "lvtd-dgtl/storm-check", "branch": f"job/{JOB}"}
 
 
 def test_every_record_carries_the_claude_session_uuid(env):

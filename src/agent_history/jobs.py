@@ -398,6 +398,10 @@ def header_object(job: Job, **more: str) -> dict:
     """The ``job`` object every wire line of this job carries."""
     obj = {"job_id": job.job_id, "duet_channel_id": job.channel,
            "studio_task_key": job.task_key, "kind": "job"}
+    for key in ("repo", "branch"):
+        value = job.field(key)
+        if value:
+            obj[key] = value
     obj.update(more)
     return {"job": obj}
 
