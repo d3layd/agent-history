@@ -145,7 +145,8 @@ def test_vm_records_are_their_own_conversation_tagged_with_the_job(env):
     assert len(lines) == 3
     for line in lines:
         assert line["job"] == {"job_id": JOB, "duet_channel_id": "chan_7Hq2",
-                               "studio_task_key": "ATR-31", "kind": "vm", "vm_id": VM}
+                               "studio_task_key": "ATR-31", "kind": "vm", "vm_id": VM,
+                               "repo": "lvtd-dgtl/storm-check", "branch": f"job/{JOB}"}
         assert JOB in line["cwd"] and VM in line["origin"] or line["role"] == "job"
     (header,) = [l for l in lines if l["role"] == "job"]
     assert header["text"].startswith(f"[claude-jobs vm] {JOB} vm {VM}")
