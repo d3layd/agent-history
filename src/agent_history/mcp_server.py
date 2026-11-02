@@ -114,6 +114,34 @@ def _resolve(session: str) -> str | None:
         db.close()
 
 
+def _record_as_hit(note: dict) -> dict:
+    """A history_record note in the result shape records had in the
+    transcript index."""
+    return {"timestamp": note.get("created_at") or "", "agent": SURFACE,
+            "machine": note.get("machine") or "", "project": note.get("project") or "",
+            "session": note.get("record_session") or "",
+            "session_id": note.get("record_session") or "", "role": RECORD_ROLE,
+            "score": note.get("score"), "distance": None,
+            "excerpt": _clip(note.get("text") or note.get("excerpt") or "", EXCERPT_CHARS)}
+
+
+def _merge_records(results: list[dict], records: list[dict], k: int) -> list[dict]:
+    """Interleave transcript hits and record notes by rank (each list scores
+    1/(60+rank), transcripts first on a tie), dropping a record that is still
+    in the transcript index too, and re-number the ranks."""
+    if not records:
+        return results
+    seen = {(r["session_id"], r["excerpt"][:120]) for r in results}
+    scored = [(1.0 / (60 + i), 0, i, r) for i, r in enumerate(results)]
+    for i, note in enumerate(records):
+        hit = _record_as_hit(note)
+        if (hit["session_id"], hit["excerpt"][:120]) in seen:
+            continue
+        scored.append((1.0 / (60 + i), 1, i, hit))
+    scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+    return [{**hit, "rank": rank} for rank, (_, _, _, hit) in enumerate(scored[:k], 1)]
+
+
 def _require(identity: Identity | None, scope: str) -> Identity:
     if identity is None:
         raise ToolFailure("unauthorized")
@@ -146,7 +174,18 @@ def recall(identity: Identity | None, query: str, *, k: int = DEFAULT_K,
     k = max(1, min(int(k), MAX_K))
 
     note_hits: list[dict] = []
+    record_hits: list[dict] = []
+    wanted = agent or surface
     with _tenant_index(identity.tenant):
+        # history_record entries live in the notes store now (piece D). The
+        # default recall still returns them, in the shape they always had.
+        if notes == "exclude" and (not wanted or wanted == SURFACE):
+            try:
+                record_hits = notes_store.search(query, k=k, mode=mode, records=True,
+                                                 cwd=cwd or None, machine=machine or None)
+            except embed.EmbedError as exc:
+                raise ToolFailure(f"embedding unavailable ({exc}); "
+                                  "retry with mode='text'") from None
         if notes != "exclude":
             try:
                 note_hits = notes_store.search(query, k=k, mode=mode)
@@ -182,8 +221,9 @@ def recall(identity: Identity | None, query: str, *, k: int = DEFAULT_K,
             "excerpt": _clip(row.get("text") or "", EXCERPT_CHARS),
         })
     if notes == "exclude":
-        return {"query": query, "mode": mode, "count": len(results),
-                "results": results}
+        merged = _merge_records(results, record_hits, k)
+        return {"query": query, "mode": mode, "count": len(merged),
+                "results": merged}
     # Notes first (a note is a pointer to read), then transcript hits.
     for hit in results:
         hit["type"] = "transcript"
@@ -213,6 +253,18 @@ def show_session(identity: Identity | None, session: str, *,
                         rows = show.rows_for(uid, around=around, limit=limit)
             except store.StoreError as exc:
                 raise ToolFailure(str(exc)) from None
+        if not rows and session.startswith(f"{SURFACE}-"):
+            # A chat's record trail, from the notes store (piece D).
+            records = notes_store.records_for_session(session, limit=limit)
+            if records:
+                first = records[0]
+                return {"session": session, "session_id": session, "agent": SURFACE,
+                        "machine": first.get("machine") or "",
+                        "project": first.get("project") or "",
+                        "messages": [{"timestamp": r.get("created_at") or "",
+                                      "role": RECORD_ROLE,
+                                      "text": _clip(r.get("text") or "", SHOW_TEXT_CHARS)}
+                                     for r in records]}
     if not rows:
         raise ToolFailure(f"nothing indexed for session {session!r}")
 
@@ -315,7 +367,13 @@ def _write_batch(directory: Path, line: str, record_id: str) -> Path:
 def record(identity: Identity | None, *, title: str, summary: str,
            decisions: list[str] | None = None, findings: list[str] | None = None,
            links: list[str] | None = None, chat_url: str | None = None,
-           project: str | None = None) -> dict:
+           project: str | None = None, duet_channel_id: str | None = None,
+           duet_message_id: str | None = None, session_id: str | None = None,
+           session_machine: str | None = None, job_id: str | None = None) -> dict:
+    """Save a chat record. Same name, arguments and answer as before, but the
+    record is a note now (piece D): it goes to the notes inbox, never the
+    transcript index. The optional Duet / Claude Code ids give it a real
+    source link; without one its source is the record's own chat session."""
     identity = _require(identity, "write")
     title = (title or "").strip()
     summary = (summary or "").strip()
@@ -337,29 +395,60 @@ def record(identity: Identity | None, *, title: str, summary: str,
     match = _CHAT_URL.match(chat_url or "")
     # Every milestone of one chat shares a session, so history_show on it
     # returns the chat's whole record trail.
-    session_id = f"{SURFACE}-{match.group(1) if match else record_id}"
-    text, found = redact.redact(record_text(
-        title, summary, decisions, findings, links, chat_url, project, record_id))
-    cwd, found_cwd = redact.redact(project or "")
-    found.update(found_cwd)
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
-
-    line = json.dumps({
-        "v": INBOX_FORMAT, "machine": identity.machine, "agent": SURFACE,
-        "origin": f"mcp:{SURFACE}/{record_id}", "session_id": session_id,
-        "cwd": cwd, "timestamp": timestamp, "role": RECORD_ROLE, "text": text,
-    }, ensure_ascii=False)
-    directory = _inbox_dir(identity)
-    _write_batch(directory, line, record_id)
+    legacy_session = f"{SURFACE}-{match.group(1) if match else record_id}"
+    source = _record_source(identity, legacy_session, chat_url=chat_url,
+                            duet_channel_id=duet_channel_id,
+                            duet_message_id=duet_message_id, session_id=session_id,
+                            session_machine=session_machine, job_id=job_id)
+    counter: Counter = Counter()
+    try:
+        written = notes_store.build(
+            title=title, summary=summary, decisions=decisions, findings=findings,
+            links=links, source=source, author=f"mcp:{identity.name}",
+            note_id=notes_store.record_note_id(record_id), counter=counter,
+            record={"record_id": record_id, "session": legacy_session, "project": project,
+                    "text": record_text(title, summary, decisions, findings, links,
+                                        chat_url, project, record_id)})
+    except notes_store.NoteError as exc:
+        raise ToolFailure(str(exc)) from None
+    directory = _inbox_dir(identity) / notes_store.NOTES_DIR
+    if directory.is_symlink():
+        raise ToolFailure("refusing a symlinked notes directory")
+    try:
+        notes_store.write_file(directory, written)
+    except notes_store.NoteError as exc:
+        raise ToolFailure(str(exc)) from None
+    # Counted as before: what was redacted in the record's text and project.
+    _, found = redact.redact(record_text(title, summary, decisions, findings, links,
+                                         chat_url, project, record_id))
+    found.update(redact.redact(project or "")[1])
     return {
         "record_id": record_id,
-        "session": session_id,
-        "timestamp": timestamp,
+        "session": legacy_session,
+        "timestamp": written["created_at"],
         "machine": identity.machine,
+        "note_id": written["note_id"],
         "status": "queued: indexed on the hub's next run (about a minute)",
         "redacted": dict(Counter(found)),
     }
+
+
+def _record_source(identity: Identity, legacy_session: str, *, chat_url, duet_channel_id,
+                   duet_message_id, session_id, session_machine, job_id) -> dict:
+    """The best source a history_record call gave: a claude.ai URL, the Duet
+    channel + message ids, a Claude Code session, else the record's own chat
+    session (which history_show serves from the notes store)."""
+    for kwargs in ({"chat_url": chat_url},
+                   {"duet_channel_id": duet_channel_id, "duet_message_id": duet_message_id},
+                   {"session_id": session_id, "machine": session_machine, "job_id": job_id}):
+        if not any(kwargs.values()):
+            continue
+        try:
+            return notes_store.make_source(**kwargs)
+        except notes_store.NoteError as exc:
+            if "chat_url" not in kwargs:   # a bad Duet/Claude Code id is the caller's to fix
+                raise ToolFailure(str(exc)) from None
+    return notes_store.record_source(identity.machine, legacy_session)
 
 
 def note(identity: Identity | None, *, title: str, summary: str,

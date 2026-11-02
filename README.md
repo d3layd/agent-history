@@ -607,6 +607,18 @@ hub, notes arrive in `inbox/<tenant>/<machine>/notes/` and are indexed by
 the same unit. Install: [`deploy/notes/`](deploy/notes/README.md); design:
 [`docs/design/session-notes.md`](docs/design/session-notes.md).
 
+#### history_record writes notes
+
+`history_record` writes notes too (they are summaries, not transcripts): same
+tool, same arguments, plus optional `duet_channel_id` / `duet_message_id` or
+`session_id` / `session_machine` / `job_id` for a source link. Reads keep
+working: the default `history_recall` and `surface="claude-ai-chat"` still
+return records in their old shape, and `history_show` on a record's
+`claude-ai-chat-…` session returns the chat's record trail. On a hub,
+`agent-history notes migrate-records` (dry run unless `--yes`) moves existing
+records out of the transcript index; the indexer diverts any old-format
+record line to notes. Design: [`docs/design/history-record-notes.md`](docs/design/history-record-notes.md).
+
 ### MCP server: claude.ai and other MCP clients
 
 `agent-history mcp` serves the hub's history as MCP tools, so Claude on
