@@ -184,3 +184,28 @@ agent-history boat-export --job "$JOB" --check "$VM" && boat delete "$VM"
 
 `&&` stays safe: only exit 0 deletes. The runner owns `boat delete`; this
 tool never calls it.
+
+## Archive guard and daily sweep (`boat-archive`)
+
+Boat has no archive verb: `boat stop` snapshots a sandbox and keeps its data
+14 days (`boat snapshot <id> <name>` keeps it longer). A job VM that is
+stopped and forgotten loses its transcripts after that. Two pieces close it:
+
+- **`boat-archive --job <id> <vm>...`**, the guarded final stop: copy back
+  (`boat-export`) if the copy isn't confirmed, and only when it has arrived
+  and `confirm-indexed` covers this exact copy, stop the VM and write
+  `vms/<vm>/ARCHIVED.json` (stop time and the date Boat's copy expires).
+  Otherwise refuse and leave the VM stopped. No delete call exists in the
+  Boat wrapper.
+- **`boat-archive --sweep`**, daily: for every job, list its VMs, skip the
+  archived and the confirmed ones, and print one line per VM that is
+  stopped (days left before Boat drops its data), expired, or gone. Running
+  VMs are skipped: the job may still be using them. Empty output is a quiet
+  day, so a Hermes `deliver=telegram` cron can post it verbatim.
+
+**Tying VMs to jobs.** Read all of: `job.json` `vms` (for a runner that
+records the VMs it starts), `vms/<vm_id>/` (exported before), and Boat
+sandboxes whose name contains the job id (from `boat list --all --json`).
+Boat labels would be cleaner but the CLI can't set them; a name can be set
+at `boat new --name "<job_id> <purpose>"` and fixed with `boat rename`. If
+the listing fails, the sweep still checks the recorded VMs and says so.

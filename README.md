@@ -630,6 +630,35 @@ its own conversation, `history_show(session="<job_id>/vm/<vm_id>")`.
 `--check` re-confirms an earlier export from its receipt without calling
 Boat. Design: [`docs/design/boat-vm-transcripts.md`](docs/design/boat-vm-transcripts.md).
 
+### Boat VMs: `boat-archive` and the daily sweep
+
+Boat has no separate archive step: `boat stop` snapshots a sandbox and keeps
+its data **14 days** (`boat snapshot <id> <name>` keeps it longer), then the
+disk is gone. The risk is a job VM that is stopped and forgotten before its
+transcripts were copied.
+
+- `agent-history boat-archive --job <job_id> <vm_id>...` is the guarded final
+  stop. If a VM's copy is not confirmed yet it runs `boat-export` first; only
+  once the copy has arrived **and** the runner's `confirm-indexed` result
+  covers it does it make sure the VM is stopped and record
+  `<jobs>/<job_id>/vms/<vm_id>/ARCHIVED.json` (with the date Boat's copy
+  expires). Otherwise it refuses and leaves the VM stopped. Exit 0 archived,
+  4 arrived but awaiting index confirmation, 1 refused, 2 bad input. It never
+  deletes a VM.
+- `agent-history boat-archive --sweep` is the daily check: one line per job
+  VM that is stopped, expired or gone with transcripts **not confirmed
+  copied**, with how many days Boat still keeps its data and the command that
+  fixes it (`!!` when 3 days or less are left, or the data is gone). Empty
+  output means nothing to report, so a cron that posts output verbatim (a
+  Hermes `deliver=telegram` job, like `claude-job notify --drain`) is silent
+  on good days. `--json` for machines; `--no-discover` skips the Boat listing.
+
+Which VMs belong to a job (all three are read): the job's `job.json` `vms`
+list (ids, or objects with `id`), VMs exported before (`vms/<vm_id>/`), and
+any Boat sandbox whose **name contains the job id**. Start job VMs with
+`boat new --name "<job_id> <purpose>"`; Boat labels can't be set from the
+CLI, the name can (`boat rename` fixes a missed one).
+
 ### Session notes
 
 Next to raw transcripts, agent-history keeps **session notes**: short
