@@ -41,7 +41,11 @@ from typing import Iterable
 from . import config, embed, redact
 
 FORMAT = 1
-KINDS = ("claude-ai", "duet", "claude-code")
+KINDS = ("claude-ai", "duet", "claude-code", "record")
+RECORD_ORIGIN = "history_record"
+RECORD_SURFACE = "claude-ai-chat"
+_RECORD_SESSION = re.compile(r"^claude-ai-chat-[A-Za-z0-9-]{1,80}$")
+_RECORD_ID = re.compile(r"^rec-[0-9a-f]{6,40}$")
 NOTES_DIR = "notes"
 PROCESSED = ".processed"
 MODES = ("hybrid", "text", "vector")
@@ -155,11 +159,24 @@ def make_source(*, chat_url: str | None = None, duet_channel_id: str | None = No
     return source
 
 
+def record_source(client: str, session: str) -> dict:
+    """The source of a history_record call that gave no link: the record's
+    own chat session, which history_show resolves from the notes store.
+    Only history_record and the migration build one."""
+    if not (client and _MACHINE.match(client) and len(client) <= MAX_FIELD):
+        raise NoteError("a record source needs the client machine")
+    if not _RECORD_SESSION.match(session or ""):
+        raise NoteError("a record source needs its claude-ai-chat-… session")
+    return {"kind": "record", "client": client, "session": session}
+
+
 def validate_source(source: object) -> dict:
     """Re-check a source read from the wire."""
     if not isinstance(source, dict) or source.get("kind") not in KINDS:
         raise NoteError("unknown source kind")
     kind = source["kind"]
+    if kind == "record":
+        return record_source(source.get("client"), source.get("session"))
     if kind == "claude-ai":
         return make_source(chat_url=source.get("url"))
     if kind == "duet":
@@ -176,6 +193,8 @@ def show_target(source: dict, span: dict | None = None) -> dict | None:
         return {"session": _CHAT_URL.match(source["url"]).group(1), "around": around}
     if source["kind"] == "claude-code":
         return {"session": source.get("job_id") or source["session_id"], "around": around}
+    if source["kind"] == "record":
+        return {"session": source["session"], "around": None}
     return None  # Duet transcripts are not indexed yet
 
 
@@ -184,6 +203,8 @@ def source_line(source: dict) -> str:
         return f"claude.ai chat {source['url']}"
     if source["kind"] == "duet":
         return f"Duet channel {source['channel_id']} from message {source['message_id']}"
+    if source["kind"] == "record":
+        return f"history_record from {source['client']} ({source['session']})"
     line = f"Claude Code session {source['session_id']} on {source['machine']}"
     return line + (f", job {source['job_id']}" if source.get("job_id") else "")
 
@@ -195,7 +216,9 @@ def _now() -> str:
 def build(*, title: str, summary: str, source: dict, decisions=None, findings=None,
           links=None, span_start: str | None = None, span_end: str | None = None,
           author: str = "agent", corrects: str | None = None,
-          counter: Counter | None = None, fallback: bool = False) -> dict:
+          counter: Counter | None = None, fallback: bool = False,
+          record: dict | None = None, note_id: str | None = None,
+          created_at: str | None = None) -> dict:
     """A validated, redacted note, ready for the wire. ``fallback`` marks a
     note built without a model summary (first prompt + last message)."""
     title = _clean(title, "title", MAX_TITLE, required=True)
@@ -206,8 +229,10 @@ def build(*, title: str, summary: str, source: dict, decisions=None, findings=No
     span = {"start": _clean(span_start, "span_start", 40) or None,
             "end": _clean(span_end, "span_end", 40) or None}
     note = {
-        "v": FORMAT, "kind": "note", "note_id": "note-" + uuid.uuid4().hex[:20],
-        "created_at": _now(), "author": _clean(author, "author", 80) or "agent",
+        "v": FORMAT, "kind": "note",
+        "note_id": note_id or "note-" + uuid.uuid4().hex[:20],
+        "created_at": _clean(created_at, "created_at", 40) or _now(),
+        "author": _clean(author, "author", 80) or "agent",
         "source": validate_source(source), "span": span,
         "title": title, "summary": summary,
         "decisions": _items("decisions", decisions),
@@ -216,7 +241,31 @@ def build(*, title: str, summary: str, source: dict, decisions=None, findings=No
         "corrects": corrects,
         "fallback": bool(fallback),
     }
+    if record is not None:
+        note["origin"] = RECORD_ORIGIN
+        note["record"] = _record_fields(record)
+    elif note["source"]["kind"] == "record":
+        raise NoteError("a record source is only for history_record")
     return redact_note(note, counter)
+
+
+def _record_fields(record: dict) -> dict:
+    """What a history_record note keeps of the record: its id, its chat
+    session, its project and its exact searchable text."""
+    record_id = str(record.get("record_id") or "")
+    session = str(record.get("session") or "")
+    if not _RECORD_ID.match(record_id) or not _RECORD_SESSION.match(session):
+        raise NoteError("a record needs its rec-… id and claude-ai-chat-… session")
+    return {"record_id": record_id, "session": session,
+            "project": _clean(record.get("project"), "project", 200) or None,
+            "text": _clean(record.get("text"), "record text", MAX_SUMMARY * 2, required=True)}
+
+
+def record_note_id(record_id: str) -> str:
+    """A record's note id, derived from its record id: however many times a
+    record arrives (the MCP server, the diversion, the migration), it is one
+    note."""
+    return "note-" + hashlib.sha256(record_id.encode("utf-8")).hexdigest()[:20]
 
 
 def redact_note(note: dict, counter: Counter | None = None) -> dict:
@@ -241,11 +290,17 @@ def redact_note(note: dict, counter: Counter | None = None) -> dict:
         if key in source:
             source[key] = clean(source[key])
     out["source"] = source
+    if isinstance(note.get("record"), dict):
+        out["record"] = {**note["record"], "text": clean(note["record"].get("text")),
+                         "project": clean(note["record"].get("project"))}
     return out
 
 
 def note_text(note: dict) -> str:
-    """The searchable body of a note."""
+    """The searchable body of a note. A history_record note keeps the
+    record's own text, so search and excerpts read exactly as before."""
+    if note.get("origin") == RECORD_ORIGIN and isinstance(note.get("record"), dict):
+        return note["record"]["text"]
     lines = [f"[note] {note['title']}", f"Source: {source_line(note['source'])}"]
     span = note.get("span") or {}
     if span.get("start") or span.get("end"):
@@ -290,6 +345,13 @@ def parse(line: str) -> dict | None:
             "corrects": _clean(data.get("corrects"), "corrects", 40) or None,
             "fallback": data.get("fallback") is True,
         }
+        if data.get("origin") == RECORD_ORIGIN:
+            note["origin"] = RECORD_ORIGIN
+            note["record"] = _record_fields(data.get("record") or {})
+            if note["note_id"] != record_note_id(note["record"]["record_id"]):
+                return None
+        elif note["source"]["kind"] == "record":
+            return None
     except NoteError:
         return None
     return note
@@ -395,6 +457,13 @@ def open_store(write: bool) -> tuple[sqlite3.Connection, bool]:
         db, vec = _connect(path)
         config.secure_file(path)
         db.executescript(_SCHEMA)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(notes)")}
+        for column in ("origin", "record_session", "project"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE notes ADD COLUMN {column} TEXT")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_notes_record_session "
+                   "ON notes(record_session)")
+        db.commit()
         try:
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING "
                        "fts5(text, content='notes', content_rowid='id')")
@@ -433,7 +502,9 @@ def _fts(db: sqlite3.Connection) -> bool:
 
 
 def insert(db: sqlite3.Connection, note: dict, machine: str, vectors: bool) -> bool:
-    """Store one note (redacted again here). False if it was already there."""
+    """Store one note (redacted again here). False if it was already there.
+    An embedder failure raises before anything is written; callers that must
+    not wait for Ollama pass ``vectors=False``."""
     note = redact_note(note)
     text = note_text(note)
     digest = hashlib.sha256(json.dumps(
@@ -443,15 +514,18 @@ def insert(db: sqlite3.Connection, note: dict, machine: str, vectors: bool) -> b
         return False
     vector = embed.embed(text) if vectors else None  # before the write: a failure keeps nothing
     show = show_target(note["source"], note["span"]) or {}
+    record = note.get("record") if note.get("origin") == RECORD_ORIGIN else None
     cursor = db.execute(
         "INSERT INTO notes (note_id, created_at, machine, author, source_kind, source, "
         "show_session, show_around, span_start, span_end, title, text, note, corrects, "
-        "content_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "content_hash, origin, record_session, project) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (note["note_id"], note["created_at"], machine, note["author"],
          note["source"]["kind"], json.dumps(note["source"], sort_keys=True),
          show.get("session"), show.get("around"), note["span"]["start"],
          note["span"]["end"], note["title"], text,
-         json.dumps(note, ensure_ascii=False, sort_keys=True), note["corrects"], digest))
+         json.dumps(note, ensure_ascii=False, sort_keys=True), note["corrects"], digest,
+         note.get("origin"), (record or {}).get("session"), (record or {}).get("project")))
     if _fts(db):
         db.execute("INSERT INTO notes_fts(rowid, text) VALUES (?, ?)", (cursor.lastrowid, text))
     if vector is not None:
@@ -462,14 +536,17 @@ def insert(db: sqlite3.Connection, note: dict, machine: str, vectors: bool) -> b
 
 _COLS = ("n.id, n.note_id, n.created_at, n.machine, n.author, n.source, "
          "n.show_session, n.show_around, n.span_start, n.span_end, n.title, n.text, "
-         "n.corrects")
+         "n.corrects, n.origin, n.record_session, n.project")
 
 
 def _row(row, score=None) -> dict:
     (_id, note_id, created, machine, author, source, show_session, show_around,
-     start, end, title, text, corrects) = row
+     start, end, title, text, corrects, origin, record_session, project) = row
     text = text or ""
+    extra = ({"origin": origin, "record_session": record_session, "project": project,
+              "text": text} if origin == RECORD_ORIGIN else {})
     return {
+        **extra,
         "type": "note", "note_id": note_id, "created_at": created,
         "machine": machine, "author": author, "title": title,
         "source": json.loads(source),
@@ -508,8 +585,12 @@ def _vector_hits(db, query: str, limit: int) -> list[int]:
     return [r[0] for r in rows]
 
 
-def search(query: str, *, k: int = 8, mode: str = "hybrid") -> list[dict]:
-    """Notes only, best first."""
+def search(query: str, *, k: int = 8, mode: str = "hybrid",
+           records: bool | None = None, cwd: str | None = None,
+           machine: str | None = None) -> list[dict]:
+    """Notes only, best first. ``records``: True for history_record notes
+    only, False for session notes only, None for both. ``cwd`` narrows
+    records to a project substring, ``machine`` to the delivering machine."""
     if mode not in MODES:
         raise NoteError(f"mode must be one of {', '.join(MODES)}")
     query = (query or "").strip()
@@ -527,15 +608,94 @@ def search(query: str, *, k: int = 8, mode: str = "hybrid") -> list[dict]:
         for ranked in lists:
             for rank, rowid in enumerate(ranked):
                 scores[rowid] = scores.get(rowid, 0.0) + 1.0 / (60 + rank)
-        best = sorted(scores, key=lambda r: -scores[r])[:k]
         out = []
-        for rowid in best:
+        for rowid in sorted(scores, key=lambda r: -scores[r]):
             row = db.execute(f"SELECT {_COLS} FROM notes n WHERE n.id = ?", (rowid,)).fetchone()
-            if row:
-                out.append(_row(row, round(scores[rowid], 6)))
+            if not row:
+                continue
+            hit = _row(row, round(scores[rowid], 6))
+            is_record = hit.get("origin") == RECORD_ORIGIN
+            if records is not None and is_record != records:
+                continue
+            if cwd and cwd not in (hit.get("project") or ""):
+                continue
+            if machine and hit["machine"] != machine:
+                continue
+            out.append(hit)
+            if len(out) >= k:
+                break
         return out
     finally:
         db.close()
+
+
+def records_for_session(session: str, *, limit: int = 50) -> list[dict]:
+    """The history_record notes of one chat session, oldest first."""
+    if not _RECORD_SESSION.match(session or "") or not db_path().exists():
+        return []
+    db, _ = open_store(write=False)
+    try:
+        try:
+            rows = db.execute(f"SELECT {_COLS} FROM notes n WHERE n.record_session = ? "
+                              "ORDER BY n.created_at, n.id", (session,)).fetchall()
+        except sqlite3.OperationalError:  # a store from before records
+            return []
+        return [_row(r) for r in rows][-max(1, limit):]
+    finally:
+        db.close()
+
+
+# ------------------------------------------------------- history_record notes
+
+def _list_block(lines: list[str], heading: str) -> list[str]:
+    try:
+        start = lines.index(f"{heading}:") + 1
+    except ValueError:
+        return []
+    out = []
+    for line in lines[start:]:
+        if not line.startswith("- "):
+            break
+        out.append(line[2:])
+    return out
+
+
+def from_legacy(text: str, *, session: str, machine: str, timestamp: str,
+                origin: str) -> dict:
+    """A note for a record written in the old format (a transcript line with
+    agent claude-ai-chat, role summary, origin mcp:claude-ai-chat/rec-…)."""
+    record_id = origin.rsplit("/", 1)[-1]
+    lines = text.splitlines()
+    first = lines[0] if lines else ""
+    title = first.split("] ", 1)[1] if first.startswith("[claude.ai chat record] ") else first
+    def field(label):
+        return next((l.split(": ", 1)[1] for l in lines if l.startswith(f"{label}: ")), None)
+    chat_url, project = field("Chat"), field("Project")
+    try:
+        summary_lines = lines[lines.index("Summary:") + 1:]
+    except ValueError:
+        summary_lines = lines[1:]
+    summary = "\n".join(l for l in summary_lines if l and not l.endswith(":")
+                        and not l.startswith("- ")).strip() or title
+    try:
+        source = make_source(chat_url=chat_url) if chat_url else record_source(machine, session)
+    except NoteError:
+        source = record_source(machine, session)
+    return build(title=title[:MAX_TITLE] or "Chat record", summary=summary[:MAX_SUMMARY],
+                 decisions=_list_block(lines, "Decisions")[:MAX_ITEMS],
+                 findings=_list_block(lines, "Findings")[:MAX_ITEMS],
+                 links=_list_block(lines, "Links")[:MAX_ITEMS],
+                 source=source, author="history_record", note_id=record_note_id(record_id),
+                 created_at=timestamp or None,
+                 record={"record_id": record_id, "session": session, "project": project,
+                         "text": text})
+
+
+def legacy_record_line(data: dict) -> bool:
+    """Whether a shipped/inbox line is a history_record in the old format."""
+    return (isinstance(data, dict) and data.get("agent") == RECORD_SURFACE
+            and data.get("role") == "summary"
+            and str(data.get("origin") or "").startswith(f"mcp:{RECORD_SURFACE}/rec-"))
 
 
 # ----------------------------------------------------------------- hub inbox
@@ -1057,5 +1217,100 @@ def audit_log() -> list[dict]:
                     "FROM notes_audit ORDER BY id")]
     except sqlite3.OperationalError:
         return []
+    finally:
+        db.close()
+
+
+# ----------------------------------------------------------- record migration
+
+def _stitch(pieces: list[str]) -> tuple[str, bool]:
+    """Join a record's chunks back into its text. Chunks overlap by up to
+    CHUNK_OVERLAP characters; returns (text, every join found its overlap)."""
+    from .textproc import CHUNK_OVERLAP
+
+    text, clean = pieces[0], True
+    for piece in pieces[1:]:
+        overlap = 0
+        for n in range(min(len(text), len(piece), CHUNK_OVERLAP + 100), 0, -1):
+            if text.endswith(piece[:n]):
+                overlap = n
+                break
+        clean = clean and overlap > 0
+        text += piece[overlap:]
+    return text, clean
+
+
+def migrate_records(apply: bool = False) -> int:
+    """Move history_record entries out of the transcript index into notes.
+
+    Dry run unless ``apply``. Per record: write the note (idempotent: the id
+    comes from the record id), read it back, append the record's chunks to a
+    rollback file, and only then delete them from the transcript index."""
+    from . import store
+
+    if not config.db_path().exists():
+        print("migrate-records: no transcript index here", file=sys.stderr)
+        return 1
+    db = store.open_for_maintenance()
+    try:
+        rows = db.execute(
+            "SELECT id, origin, session_id, timestamp, text, machine FROM chunks "
+            "WHERE agent = ? AND role = 'summary' AND origin LIKE ? "
+            "ORDER BY origin, coalesce(chunk_ordinal, 0), coalesce(char_start, 0), id",
+            (RECORD_SURFACE, f"mcp:{RECORD_SURFACE}/rec-%")).fetchall()
+        groups: dict[str, list[tuple]] = {}
+        for row in rows:
+            groups.setdefault(row[1], []).append(row)
+        plans = []
+        for origin, chunks in groups.items():
+            text, clean = _stitch([c[4] or "" for c in chunks])
+            machine = chunks[0][5] or config.machine_id()
+            try:
+                note = from_legacy(text, session=chunks[0][2] or "", machine=machine,
+                                   timestamp=chunks[0][3] or "", origin=origin)
+            except NoteError as exc:
+                print(f"migrate-records: skipping {origin}: {exc}", file=sys.stderr)
+                continue
+            plans.append((origin, chunks, note, machine, clean))
+            flag = "" if clean else "  [chunks joined without a clean overlap]"
+            print(f"  {note['note_id']}  {note['record']['session']}  "
+                  f"{len(chunks)} chunk(s)  {note['title'][:70]}{flag}")
+        print(f"migrate-records: {len(plans)} record(s), {sum(len(p[1]) for p in plans)} "
+              "chunk(s) in the transcript index")
+        if not apply:
+            print("migrate-records: dry run, nothing written. Run with --yes to move them.")
+            return 0
+        if not plans:
+            return 0
+        ndb, vectors = open_store(write=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = config.data_home() / f"migrate-records-{stamp}.jsonl"
+        moved = 0
+        try:
+            for origin, chunks, note, machine, _clean_join in plans:
+                try:
+                    insert(ndb, note, machine, vectors)
+                except embed.EmbedError:
+                    insert(ndb, note, machine, False)   # text search still works
+                ndb.commit()
+                if not ndb.execute("SELECT 1 FROM notes WHERE note_id = ?",
+                                   (note["note_id"],)).fetchone():
+                    print(f"migrate-records: {origin}: note not readable; chunks kept",
+                          file=sys.stderr)
+                    continue
+                fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                    for cid, corigin, sid, ts, text, cmachine in chunks:
+                        fh.write(json.dumps({"id": cid, "origin": corigin, "session_id": sid,
+                                             "timestamp": ts, "machine": cmachine,
+                                             "text": text}, ensure_ascii=False) + "\n")
+                store._delete_rows(db, [(c[0], c[4]) for c in chunks])
+                db.commit()
+                moved += 1
+        finally:
+            ndb.close()
+        print(f"migrate-records: moved {moved} record(s) into notes; rollback copy of "
+              f"the removed chunks: {backup}")
+        return 0 if moved == len(plans) else 1
     finally:
         db.close()

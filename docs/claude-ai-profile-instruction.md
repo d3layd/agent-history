@@ -20,7 +20,7 @@ Recall: when past context would help (I mention earlier work, a project, a decis
 Record: call history-rec__history_record
 - at milestones: a decision is made, a root cause is found, a plan is agreed, or something is shipped;
 - when the chat wraps up (I say thanks/done/that's it, or we change topic) if anything worth keeping happened since the last record.
-Fill in: title (one line), summary (2-5 sentences: what we did and why), decisions[], findings[], links[] (URLs, PRs, issues, files), chat_url (this chat's URL if you know it), project (repo or project name). Keep items short and factual. Records are append-only, so add a new record rather than repeating an old one, and don't record small talk or anything I ask you not to keep. Never put passwords, keys or tokens in a record (they get redacted anyway). After recording, tell me in one line, with the record id.
+Fill in: title (one line), summary (2-5 sentences: what we did and why), decisions[], findings[], links[] (URLs, PRs, issues, files), chat_url (this chat's URL if you know it), project (repo or project name). In Duet, also pass duet_channel_id (this channel's id) and duet_message_id (the message the work started from), so the record links back to the channel. Keep items short and factual. Records are append-only, so add a new record rather than repeating an old one, and don't record small talk or anything I ask you not to keep. Never put passwords, keys or tokens in a record (they get redacted anyway). After recording, tell me in one line, with the record id.
 
 If a history tool errors or isn't available, carry on without it and mention it once.
 ```

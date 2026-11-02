@@ -29,6 +29,15 @@ they have no corresponding tags.
   full-text entry, embedding and archived copy, and appends an audit record
   that never holds the secret; the triggers still block every other UPDATE
   and DELETE. `notes audit` lists the trail.
+- **`history_record` writes notes, not transcript chunks.** Same name,
+  arguments and answer (plus `note_id`), with optional `duet_channel_id` +
+  `duet_message_id` or `session_id` + `session_machine` (+ `job_id`) for a
+  source link; without one the record links to its own chat session. The
+  default `history_recall` and `surface="claude-ai-chat"` still return records
+  in their old shape, and `history_show(session="claude-ai-chat-…")` reads a
+  chat's record trail from the notes store. The hub indexer diverts any
+  old-format record line to notes, and `agent-history notes migrate-records`
+  (dry run unless `--yes`, with a rollback file) moves existing ones.
 - `redact` catches bare 1Password service-account tokens (`ops_…`) and Scribe
   agent keys (`scrb_agt_…`) with no `NAME=` in front. The hub's index unit indexes
   `inbox/<machine>/notes/` into the notes store.

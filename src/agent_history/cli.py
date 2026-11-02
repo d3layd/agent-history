@@ -134,6 +134,10 @@ def _build_parser() -> argparse.ArgumentParser:
                              "out of ps and shell history)")
     nscrub.add_argument("--reason", required=True, help="why, for the audit trail")
     nts_sub.add_parser("audit", help="list the notes audit trail (scrubs)")
+    nmig = nts_sub.add_parser(
+        "migrate-records", help="hub: move history_record entries out of the transcript "
+                                "index into notes (dry run unless --yes)")
+    nmig.add_argument("--yes", action="store_true", help="really move them")
     nts_sub.add_parser("index", help="hub: index notes waiting in the inbox")
     nts_sub.add_parser("hook", help="Claude Code SessionEnd hook: sweep that "
                                     "session in the background")
@@ -574,6 +578,8 @@ def _cmd_notes(args: argparse.Namespace) -> int:
               f"{', '.join(done['fields'])}; {done['archive_files']} archive file(s) "
               f"rewritten; audit record added")
         return 0
+    if action == "migrate-records":
+        return notes.migrate_records(apply=args.yes)
     if action == "audit":
         for entry in notes.audit_log():
             print(f"{entry['at']}  {entry['action']}  {entry['note_id']}  by "

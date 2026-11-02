@@ -87,8 +87,12 @@ class InboxAdapter:
             handle = open(path, encoding="utf-8", errors="replace")
         except OSError:
             return
+        diverted = 0
         with handle:
             for line in handle:
+                if _divert_record(line, machine):
+                    diverted += 1
+                    continue
                 record = _parse(line, machine)
                 if record is None:
                     bad += line.strip() != ""
@@ -97,6 +101,9 @@ class InboxAdapter:
         if bad:
             print(f"inbox: skipped {bad} malformed line(s) in {machine}/{path.name}",
                   file=sys.stderr)
+        if diverted:
+            print(f"inbox: {diverted} history_record line(s) in {machine}/{path.name} "
+                  "went to the notes store, not the transcript index")
         # Only a fully read batch is eligible to be retired.
         self._consumed.append((machine, path))
 
@@ -122,6 +129,32 @@ class InboxAdapter:
             except OSError as exc:
                 print(f"inbox: could not retire {machine}/{path.name}: {exc}",
                       file=sys.stderr)
+
+
+def _divert_record(line: str, machine: str) -> bool:
+    """A history_record line in the old format is a summary, not a
+    transcript: write it as a note into this machine's notes/ directory (the
+    notes indexer picks it up in the same run) and keep it out of the
+    transcript index. True when the line was one."""
+    from .. import notes
+
+    try:
+        data = json.loads(line)
+    except ValueError:
+        return False
+    if not notes.legacy_record_line(data):
+        return False
+    root = config.inbox_dir()
+    try:
+        note = notes.from_legacy(str(data.get("text") or ""),
+                                 session=str(data.get("session_id") or ""),
+                                 machine=machine, timestamp=str(data.get("timestamp") or ""),
+                                 origin=str(data.get("origin")))
+        notes.write_file(root / machine / notes.NOTES_DIR, note)
+    except (notes.NoteError, OSError) as exc:
+        print(f"inbox: could not divert a history_record line from {machine}: {exc}",
+              file=sys.stderr)
+    return True
 
 
 def _parse(line: str, machine: str) -> Record | None:
