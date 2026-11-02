@@ -1,0 +1,17 @@
+# Index as soon as a batch lands, instead of waiting for the timer.
+#
+# systemd watches ONE directory level, and batches land in
+# <inbox>/<tenant>/<machine>/. List each machine in a drop-in, e.g.
+#   systemctl edit agent-history-hub-index@dennis.path
+#     [Path]
+#     PathChanged=/home/ahub/inbox/dennis/pc
+#     PathChanged=/home/ahub/inbox/dennis/claude-rc
+# The timer is the safety net for anything this misses.
+[Unit]
+Description=agent-history hub: watch the %i inbox
+
+[Path]
+PathChanged=/home/ahub/inbox/%i
+
+[Install]
+WantedBy=paths.target

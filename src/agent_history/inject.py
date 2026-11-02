@@ -130,7 +130,7 @@ def _system_message(rows: list[tuple]) -> str:
     noun = "memory" if len(rows) == 1 else "memories"
     lines = [f"\U0001f4da agent-history recalled {len(rows)} {noun}"
              "  ·  /history:inject to toggle"]
-    for agent, _origin, _session, cwd, timestamp, role, text, _dist in rows:
+    for agent, _origin, _session, cwd, timestamp, role, text, *_rest in rows:
         when = (timestamp or "")[:10]
         where = os.path.basename((cwd or "").rstrip("/")) or (cwd or "?")
         snippet = " ".join(text.split())[:SNIPPET_CHARS]
@@ -160,7 +160,7 @@ def _in_scope(row, scope: str, cutoff: float, cross: float, strict: bool) -> boo
     come through. Strict mode hard-scopes to the current directory. With no
     scope known, fall back to the single cutoff (can't segment).
     """
-    distance = row[7]
+    distance = row[store.ROW_WIDTH]
     if not scope:
         return distance <= cutoff
     same = _same_scope(row[3], scope)
@@ -193,7 +193,7 @@ def _render(rows: list[tuple], cwd: str | None = None) -> str:
     header = _header(cwd)
     parts = [header]
     total = len(header)
-    for agent, _origin, session_id, cwd, timestamp, role, text, _dist in rows:
+    for agent, _origin, session_id, cwd, timestamp, role, text, *_rest in rows:
         excerpt = text[:CHUNK_CHARS]
         block = (f"\n--- {agent}/{role}  {(timestamp or '')[:16]}  "
                  f"{cwd or '?'}  session={session_id}\n{excerpt}\n")

@@ -4,10 +4,14 @@ from __future__ import annotations
 import re
 import sqlite3
 from pathlib import Path
+from typing import Iterable
 
 import sqlite_vec
 
-from . import config, embed
+from . import config, embed, sessions
+# Session identity helpers, re-exported: callers holding a store connection
+# reach them here.
+from .sessions import link_alias, resolve_session  # noqa: F401
 
 
 class StoreError(RuntimeError):
@@ -53,6 +57,48 @@ def _raw_connect(path: Path) -> sqlite3.Connection:
         db.close()
         raise StoreError(f"{EXTENSION_HELP}\n(underlying error: {exc})") from exc
     return db
+
+
+def _migrate(db: sqlite3.Connection) -> None:
+    """Bring an index written by an older version up to the current schema.
+
+    Additive only: columns are added in place, nothing is rewritten and no
+    chunk is re-embedded or deleted. `machine` (0.17) is NULL on rows indexed
+    before it existed, which readers treat as "this machine" — those chunks
+    were all indexed locally. `session_uid` and the `sessions` /
+    `session_aliases` tables (session identity) are backfilled once, in one
+    pass over the rows still lacking a uid. The chunk provenance columns
+    (`record_id`, `chunk_ordinal`, `char_start`, `char_end`) stay NULL on old
+    rows: the record they were cut from is not recoverable from a chunk.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(chunks)")}
+    for name, kind in _ADDED_COLUMNS:
+        if name not in columns:
+            db.execute(f"ALTER TABLE chunks ADD COLUMN {name} {kind}")
+    existing = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
+    # DDL only when something is missing, so a reader of a current index
+    # never needs the write lock.
+    if not {"idx_chunks_machine", "idx_chunks_session_uid", "sessions",
+            "session_aliases", "idx_aliases_value",
+            "idx_aliases_uid"} <= existing:
+        db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_machine ON chunks(machine)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_session_uid "
+                   "ON chunks(session_uid)")
+        db.executescript(sessions.SCHEMA)
+    sessions.backfill(db)
+    db.commit()
+
+
+# (name, type) of every column added to `chunks` after its first release.
+_ADDED_COLUMNS = (
+    ("machine", "TEXT"),
+    ("session_uid", "TEXT"),
+    ("record_id", "TEXT"),
+    ("chunk_ordinal", "INTEGER"),
+    ("char_start", "INTEGER"),
+    ("char_end", "INTEGER"),
+)
 
 
 def _get_meta(db: sqlite3.Connection, key: str) -> str | None:
@@ -102,13 +148,21 @@ def open_for_write() -> tuple[sqlite3.Connection, int]:
             timestamp    TEXT,
             role         TEXT,
             text         TEXT,
-            content_hash TEXT UNIQUE
+            content_hash TEXT UNIQUE,
+            machine      TEXT,
+            session_uid  TEXT,
+            -- provenance: which record a chunk was cut from, and where
+            record_id     TEXT,
+            chunk_ordinal INTEGER,
+            char_start    INTEGER,
+            char_end      INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_origin ON chunks(origin);
         CREATE INDEX IF NOT EXISTS idx_chunks_agent  ON chunks(agent);
         """
     )
 
+    _migrate(db)
     _ensure_fts(db)
 
     stored_model = _get_meta(db, "model")
@@ -149,6 +203,7 @@ def open_for_read(check_model: bool = True) -> sqlite3.Connection:
             f"no index at {path}. Run: agent-history index"
         )
     db = _raw_connect(path)
+    _migrate_for_reader(db)
     stored_model = _get_meta(db, "model")
     wanted = config.model()
     if check_model and stored_model and stored_model != wanted:
@@ -169,27 +224,52 @@ def open_for_maintenance() -> sqlite3.Connection:
     path = config.db_path()
     if not path.exists():
         raise StoreError(f"no index at {path}. Run: agent-history index")
-    return _raw_connect(path)
+    db = _raw_connect(path)
+    _migrate_for_reader(db)
+    return db
+
+
+def _migrate_for_reader(db: sqlite3.Connection) -> None:
+    """Upgrade the schema from a path that is not the indexer.
+
+    The upgrade is a few metadata-only ALTERs plus a one-pass uid backfill
+    (seconds even on a large index), so a search or purge run first after an
+    update just does it. If the index is read-only or locked for
+    longer than SQLite's wait, say so rather than failing on a missing column
+    later.
+    """
+    try:
+        _migrate(db)
+    except sqlite3.OperationalError as exc:
+        db.close()
+        raise StoreError(
+            f"the index needs a one-time schema upgrade but could not be "
+            f"written ({exc}). Run: agent-history index"
+        ) from exc
 
 
 def orphaned_counts(db: sqlite3.Connection) -> tuple[int, int]:
-    """(chunks, origins) whose source no longer exists on disk.
+    """(chunks, origins) that a rebuild from disk could not recreate.
 
     These chunks are the ones `reindex` would destroy irrecoverably — the
-    index is their only surviving copy. `db:<path>#<table>` origins are
-    checked against the database file path inside them.
+    index is their only surviving copy: their source no longer exists on
+    disk, or they came from an on-demand import (`agent-history import`)
+    that no adapter re-reads. `db:<path>#<table>` origins are checked
+    against the database file path inside them.
     """
     from pathlib import Path
 
+    from .adapters import IMPORT_ONLY_AGENTS
+
     rows = db.execute(
-        "SELECT origin, count(*) FROM chunks GROUP BY origin"
+        "SELECT agent, origin, count(*) FROM chunks GROUP BY agent, origin"
     ).fetchall()
     chunks = origins = 0
-    for origin, count in rows:
+    for agent, origin, count in rows:
         path = origin
         if origin.startswith("db:"):
             path = origin[3:].split("#", 1)[0]
-        if not Path(path).exists():
+        if agent in IMPORT_ONLY_AGENTS or not Path(path).exists():
             origins += 1
             chunks += count
     return chunks, origins
@@ -225,6 +305,8 @@ def reset() -> None:
                 db.execute("DROP TABLE IF EXISTS vec_chunks")
                 db.execute("DROP TABLE IF EXISTS vec_chunks_new")
                 db.execute("DROP TABLE IF EXISTS fts_chunks")
+                db.execute("DROP TABLE IF EXISTS sessions")
+                db.execute("DROP TABLE IF EXISTS session_aliases")
                 db.execute("DELETE FROM meta WHERE key IN "
                            "('model', 'dimension', 'reembed_model')")
                 db.commit()
@@ -278,13 +360,32 @@ def insert_chunk(
     text: str,
     content_hash: str,
     vector: list[float],
+    machine: str | None = None,
+    session_uid: str | None = None,
+    record_id: str | None = None,
+    chunk_ordinal: int | None = None,
+    char_start: int | None = None,
+    char_end: int | None = None,
 ) -> None:
+    """Store one embedded chunk and register its session.
+
+    `session_uid` is derived when not given (see sessions.derive_uid). The
+    provenance fields say which record the chunk was cut from and where:
+    `char_start`/`char_end` are offsets into that record's text.
+    """
+    machine = machine or config.machine_id()
+    uid = session_uid or sessions.derive_uid(agent, machine, session_id, origin)
     cursor = db.execute(
         "INSERT INTO chunks "
-        "(agent, origin, session_id, cwd, timestamp, role, text, content_hash) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (agent, origin, session_id, cwd, timestamp, role, text, content_hash),
+        "(agent, origin, session_id, cwd, timestamp, role, text, content_hash, "
+        "machine, session_uid, record_id, chunk_ordinal, char_start, char_end) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (agent, origin, session_id, cwd, timestamp, role, text, content_hash,
+         machine, uid, record_id, chunk_ordinal, char_start, char_end),
     )
+    sessions.register_session(db, uid, agent=agent, machine=machine,
+                              session_id=session_id, origin=origin,
+                              timestamp=timestamp, cwd=cwd)
     db.execute(
         "INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)",
         (cursor.lastrowid, embed.pack(vector)),
@@ -303,27 +404,48 @@ def query(
     *,
     cwd: str | None = None,
     agent: str | None = None,
+    machine: str | None = None,
+    exclude_machine: Iterable[str] | None = None,
 ) -> list[tuple]:
-    """Nearest neighbours, optionally narrowed by cwd substring or agent.
+    """Nearest neighbours, optionally narrowed by cwd substring, agent or
+    machine. Rows are (*_ROW_COLS, distance).
 
     Filters are applied after the vector search, so we over-fetch when one is
     present to avoid returning fewer than k results.
     """
-    fetch = min(k * 4 if (cwd or agent) else k, _VEC_K_MAX)
+    fetch = _fetch(k, cwd, agent, machine, exclude_machine)
     rows = db.execute(
-        "SELECT c.agent, c.origin, c.session_id, c.cwd, c.timestamp, c.role, "
-        "       c.text, v.distance "
+        f"SELECT {_ROW_COLS}, v.distance "
         "FROM vec_chunks v JOIN chunks c ON c.id = v.rowid "
         "WHERE v.embedding MATCH ? AND k = ? "
         "ORDER BY v.distance",
         (vector, fetch),
     ).fetchall()
 
-    return _filter(rows, cwd=cwd, agent=agent)[:k]
+    return _filter(rows, cwd=cwd, agent=agent, machine=machine,
+                   exclude_machine=exclude_machine)[:k]
 
 
-_ROW_COLS = "c.agent, c.origin, c.session_id, c.cwd, c.timestamp, c.role, c.text"
+# The last column is the chunk's session uid, already canonicalised: a uid
+# merged into another one reports the survivor.
+_ROW_COLS = ("c.agent, c.origin, c.session_id, c.cwd, c.timestamp, c.role, "
+             "c.text, c.machine, "
+             "coalesce((SELECT a.session_uid FROM session_aliases a "
+             "WHERE a.kind = 'uid' AND a.value = c.session_uid), c.session_uid)")
+ROW_WIDTH = 9  # columns in _ROW_COLS; a ranking value, if any, follows
 _VEC_K_MAX = 4096  # sqlite-vec's cap on k
+
+
+def _fetch(k: int, cwd, agent, machine, exclude_machine) -> int:
+    """How many candidates to pull before the post-filters trim them.
+
+    A machine filter can discard most of the nearest neighbours (a hub's
+    biggest contributor dominates), so it over-fetches harder than the others.
+    """
+    if machine or exclude_machine:
+        return min(k * 16, _VEC_K_MAX)
+    return min(k * 4 if (cwd or agent) else k, _VEC_K_MAX)
+
 
 # Skipped by the OR fallback only, so "the/a/in" can't pull in every chunk.
 # The strict AND match still uses every term.
@@ -351,6 +473,8 @@ def text_query(
     *,
     cwd: str | None = None,
     agent: str | None = None,
+    machine: str | None = None,
+    exclude_machine: Iterable[str] | None = None,
 ) -> list[tuple]:
     """BM25-ranked full-text matches, same row shape as query() minus distance.
 
@@ -369,22 +493,25 @@ def text_query(
     terms = _TOKEN.findall(query)
     if not terms:
         return []
-    fetch = k * 4 if (cwd or agent) else k
+    fetch = _fetch(k, cwd, agent, machine, exclude_machine)
+    narrowing = {"cwd": cwd, "agent": agent, "machine": machine,
+                 "exclude_machine": exclude_machine}
 
-    hits = _match(db, " ".join(map(_quote, terms)), fetch, cwd=cwd, agent=agent)
+    hits = _match(db, " ".join(map(_quote, terms)), fetch, **narrowing)
     if len(hits) < k:
         loose = [t for t in terms if t.lower() not in _STOPWORDS] or terms
         if len(loose) > 1 or loose != terms:
             # AND matches are a subset of these, so look past them.
             more = _match(db, " OR ".join(map(_quote, loose)), fetch + len(hits),
-                          cwd=cwd, agent=agent)
+                          **narrowing)
             for rowid, row in more.items():
                 hits.setdefault(rowid, row)
     return list(hits.values())[:k]
 
 
 def _match(db: sqlite3.Connection, match: str, limit: int, *,
-           cwd: str | None, agent: str | None) -> dict[int, tuple]:
+           cwd: str | None, agent: str | None, machine: str | None,
+           exclude_machine: Iterable[str] | None) -> dict[int, tuple]:
     """Filtered FTS rows keyed by chunk id, best BM25 first."""
     try:
         rows = db.execute(
@@ -396,7 +523,8 @@ def _match(db: sqlite3.Connection, match: str, limit: int, *,
     except sqlite3.OperationalError:
         return {}
     return {row[0]: row[1:] for row in rows
-            if _filter([row[1:]], cwd=cwd, agent=agent)}
+            if _filter([row[1:]], cwd=cwd, agent=agent, machine=machine,
+                       exclude_machine=exclude_machine)}
 
 
 def hybrid_query(
@@ -407,6 +535,8 @@ def hybrid_query(
     *,
     cwd: str | None = None,
     agent: str | None = None,
+    machine: str | None = None,
+    exclude_machine: Iterable[str] | None = None,
 ) -> list[tuple]:
     """Merge vector and full-text rankings with reciprocal rank fusion.
 
@@ -419,15 +549,17 @@ def hybrid_query(
     list, and it can only do that if both lists reach it.
     """
     pool = max(k * 10, 50)
-    vec_rows = query(db, vector, pool, cwd=cwd, agent=agent)
-    txt_rows = text_query(db, query_text, pool, cwd=cwd, agent=agent)
+    narrowing = {"cwd": cwd, "agent": agent, "machine": machine,
+                 "exclude_machine": exclude_machine}
+    vec_rows = query(db, vector, pool, **narrowing)
+    txt_rows = text_query(db, query_text, pool, **narrowing)
 
     scored: dict[tuple, list] = {}
     for rank, row in enumerate(vec_rows):
-        key = row[:7]
-        scored[key] = [row[7], 1.0 / (60 + rank)]
+        key = row[:ROW_WIDTH]
+        scored[key] = [row[ROW_WIDTH], 1.0 / (60 + rank)]
     for rank, row in enumerate(txt_rows):
-        key = row[:7]
+        key = row[:ROW_WIDTH]
         if key in scored:
             scored[key][1] += 1.0 / (60 + rank)
         else:
@@ -437,11 +569,20 @@ def hybrid_query(
     return [(*key, distance, score) for key, (distance, score) in merged[:k]]
 
 
-def _filter(rows: list[tuple], *, cwd: str | None, agent: str | None) -> list[tuple]:
+def _filter(rows: list[tuple], *, cwd: str | None, agent: str | None,
+            machine: str | None = None,
+            exclude_machine: Iterable[str] | None = None) -> list[tuple]:
     if agent:
         rows = [r for r in rows if r[0] == agent]
     if cwd:
         rows = [r for r in rows if cwd in (r[3] or "")]
+    # A NULL machine is a chunk indexed here before provenance existed.
+    local = config.machine_id()
+    if machine:
+        rows = [r for r in rows if (r[7] or local) == machine]
+    if exclude_machine:
+        skip = set(exclude_machine)
+        rows = [r for r in rows if (r[7] or local) not in skip]
     return rows
 
 
@@ -450,11 +591,14 @@ def session_rows(
     *,
     origin: str | None = None,
     session_id: str | None = None,
+    session_uid: str | None = None,
 ) -> list[tuple]:
     """Every chunk of one conversation, oldest first.
 
-    This reads the index, not the source transcript — deliberately, since for
-    a mature index most source files no longer exist.
+    `session_uid` should be canonical (see resolve_session): chunks written
+    under any uid merged into it are included. This reads the index, not the
+    source transcript — deliberately, since for a mature index most source
+    files no longer exist.
     """
     where, params = [], []
     if origin:
@@ -463,6 +607,10 @@ def session_rows(
     if session_id:
         where.append("c.session_id = ?")
         params.append(session_id)
+    if session_uid:
+        group = sessions.members(db, session_uid)
+        where.append(f"c.session_uid IN ({','.join('?' * len(group))})")
+        params.extend(group)
     if not where:
         return []
     return db.execute(
@@ -550,8 +698,13 @@ def purge_targets(
         clauses.append("cwd LIKE ?")
         params.append(f"%{cwd}%")
     if session:
-        clauses.append("session_id = ?")
-        params.append(session)
+        # Any id of the session works (uid, raw id, alias); the raw-id match
+        # is kept so an id this index cannot resolve purges as it always did.
+        uid = resolve_session(db, session)
+        group = sessions.members(db, uid) if uid else []
+        clauses.append("(session_id = ?"
+                       + "".join(" OR session_uid = ?" for _ in group) + ")")
+        params.extend([session, *group])
     if agent:
         clauses.append("agent = ?")
         params.append(agent)
@@ -560,6 +713,15 @@ def purge_targets(
     return db.execute(
         f"SELECT id, text FROM chunks WHERE {' AND '.join(clauses)}", params
     ).fetchall()
+
+
+def purge_session_ids(db: sqlite3.Connection,
+                      session: str) -> list[tuple[str, str]]:
+    """Every (kind, id) a `purge --session` of ``session`` reaches: the
+    merged group's uids, raw ids and aliases. Empty if it does not resolve
+    (then only the raw id itself is matched)."""
+    uid = resolve_session(db, session)
+    return sessions.ids_of(db, uid) if uid else []
 
 
 def purge(db: sqlite3.Connection, rows: list[tuple]) -> int:
@@ -606,9 +768,15 @@ def stats(db: sqlite3.Connection) -> dict:
     per_agent = dict(
         db.execute("SELECT agent, count(*) FROM chunks GROUP BY agent ORDER BY 2 DESC")
     )
+    local = config.machine_id()
+    per_machine: dict[str, int] = {}
+    for name, count in db.execute(
+            "SELECT machine, count(*) FROM chunks GROUP BY machine ORDER BY 2 DESC"):
+        per_machine[name or local] = per_machine.get(name or local, 0) + count
     return {
         "total": total,
         "per_agent": per_agent,
+        "per_machine": per_machine,
         "model": _get_meta(db, "model"),
         "dimension": _get_meta(db, "dimension"),
     }

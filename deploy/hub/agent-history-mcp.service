@@ -1,0 +1,56 @@
+# The hub's MCP server: history_recall / history_show / history_record for
+# MCP clients, reached through an MCP router on the same host. Install:
+#   sudo cp agent-history-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agent-history-mcp
+#
+# Needs the [mcp] extra:  uv tool install 'agent-history[mcp]'
+#
+# Tokens: create them as ahub, BEFORE starting (the server refuses to start
+# with none). Only their SHA-256 is stored, in a 0600 file:
+#   sudo -u ahub env AGENT_HISTORY_MCP_TOKENS=/home/ahub/mcp-tokens.json \
+#     /home/ahub/.local/bin/agent-history mcp token add router-read  --scope read  --tenant dennis
+#   sudo -u ahub env AGENT_HISTORY_MCP_TOKENS=/home/ahub/mcp-tokens.json \
+#     /home/ahub/.local/bin/agent-history mcp token add router-write --scope write --tenant dennis --machine claude-ai
+# Each prints its token once: put it in the router's env file, nowhere else.
+# Adding or revoking a token takes effect without a restart.
+#
+# Records written by history_record land in /home/ahub/inbox/<tenant>/<machine>/
+# and are indexed by agent-history-hub-index@<tenant> like any shipped batch.
+# Add that directory to the tenant's .path unit so they index immediately:
+#   systemctl edit agent-history-hub-index@dennis.path
+#     [Path]
+#     PathChanged=/home/ahub/inbox/dennis/claude-ai
+[Unit]
+Description=agent-history hub: MCP server (loopback, behind the MCP router)
+After=network.target ollama.service
+
+[Service]
+Type=simple
+User=ahub
+Environment=AGENT_HISTORY_TENANTS=/home/ahub/tenants
+# The inbox ROOT: a token's records go to <root>/<tenant>/<machine>/.
+Environment=AGENT_HISTORY_INBOX=/home/ahub/inbox
+Environment=AGENT_HISTORY_MCP_TOKENS=/home/ahub/mcp-tokens.json
+Environment=OLLAMA_URL=http://127.0.0.1:11434
+# Loopback only. The router on this host connects to http://127.0.0.1:8765/mcp;
+# nothing else should, and no port is opened to the network.
+ExecStart=/home/ahub/.local/bin/agent-history mcp serve --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=3
+
+# Hardening. Reading a tenant index migrates its schema in place when the
+# code is newer, so the tenants tree is writable; the inbox is written by
+# history_record. Nothing else is.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ahub/tenants /home/ahub/inbox
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

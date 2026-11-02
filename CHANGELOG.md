@@ -11,6 +11,167 @@ they have no corresponding tags.
 
 ## [Unreleased]
 
+### Added
+- **`agent-history ship-jobs`**: ships `claude -p` job transcripts (Claude
+  Code session files and the stream-json `transcript.jsonl`) from
+  `AGENT_HISTORY_JOBS_DIR`, tagged with the job id, owning Duet channel and
+  Studio task key in the batch name, a per-line `job` object and a header
+  record. Jobs read back on an unchanged hub with `history_recall` (text
+  mode, by job id) and `history_show(session=<job id>)`.
+- **`ship-jobs --final <job_id>`** and the `deploy/claude-jobs/ship-final`
+  wrapper: the job runner's last step, exit 0 only when the hub has confirmed
+  every record of the job, seal included. User units for a 2-minute timer in
+  `deploy/claude-jobs/`.
+- `ship`'s batches accept a file-name prefix and extra (redacted) wire fields.
+- **`agent-history confirm-indexed --job <job_id>`**: the index gate after
+  `ship-final`. Exit 0 when the job's header, seal and every session it lists
+  are findable by job id (the same search and show the MCP tools use); 1 not
+  yet or partial; 2 config or credential error. Reads the hub over the
+  existing read-only `serve-ssh` key (or `--local` on the hub), refuses to run
+  as `claude-jobs`, and can
+  write its JSON result to a receipt file.
+- Job records carry `claude_session_id` (header and seal: `claude_session_ids`)
+  and a new `claude` alias kind, so `history_show(session=<Claude session
+  uuid>)` resolves to the job on an upgraded hub; `history_recall` and
+  `history_show` results list `claude_session_ids`. The seal lists every
+  session (`Sessions:`) and uuid (`Claude sessions:`).
+- **`agent-history boat-export --job <job_id> <vm_id>...`**: pulls each Boat
+  VM's `~/.claude/projects` into the job directory (`vms/<vm_id>/`), verifies
+  the copy against the VM's sha256 list, leaves the VM stopped, and ships it
+  with `ship-jobs --final`. Exit 0 (safe to delete) only once arrival is
+  confirmed and the runner's `confirm-indexed` result in
+  `<jobs>/<job_id>/index-confirmed.json` covers the VM; exit 4 = arrived,
+  awaiting index confirmation. Never deletes a VM. `--check` re-confirms
+  without Boat. VM transcripts read back as `<job_id>/vm/<vm_id>` and carry
+  the VM's Claude session uuid.
+- **Session notes**, kept apart from transcripts in `notes.db`: `agent-history
+  notes add | search | sweep | ship | index | hook`, the MCP tool
+  `history_note`, and `history_recall(notes="exclude" | "include" | "only")`
+  (default `exclude`, so existing callers see no change). Every note links to
+  one source (claude.ai URL, Duet channel + message id, or Claude Code session
+  + machine + job id) and is refused without it; notes are append-only
+  (triggers refuse UPDATE/DELETE) and redacted at write and again on the hub.
+  `notes sweep` writes a note for sessions idle 5 minutes (or at session end),
+  covering only what is new since the last note. The summary comes from
+  `claude -p --model haiku` with the machine's own Claude login (never
+  `ANTHROPIC_API_KEY`), on redacted text, with a marked fallback (first prompt
+  + last message) when the call fails.
+- `agent-history notes scrub <note_id> --pattern <text|-> --reason …`: the one
+  admin exception to append-only. Replaces a leaked secret in one note, its
+  full-text entry, embedding and archived copy, and appends an audit record
+  that never holds the secret; the triggers still block every other UPDATE
+  and DELETE. `notes audit` lists the trail.
+- **`history_record` writes notes, not transcript chunks.** Same name,
+  arguments and answer (plus `note_id`), with optional `duet_channel_id` +
+  `duet_message_id` or `session_id` + `session_machine` (+ `job_id`) for a
+  source link; without one the record links to its own chat session. The
+  default `history_recall` and `surface="claude-ai-chat"` still return records
+  in their old shape, and `history_show(session="claude-ai-chat-…")` reads a
+  chat's record trail from the notes store. The hub indexer diverts any
+  old-format record line to notes, and `agent-history notes migrate-records`
+  (dry run unless `--yes`, with a rollback file) moves existing ones.
+- `redact` catches bare 1Password service-account tokens (`ops_…`) and Scribe
+  agent keys (`scrb_agt_…`) with no `NAME=` in front. The hub's index unit indexes
+  `inbox/<machine>/notes/` into the notes store.
+
+## [0.17.0] — 2026-10-15
+
+### Added
+- **Hub: one central index that every machine feeds and every session can
+  search** (#25). See the README's "Hub (central history)" section and the
+  examples in `deploy/`.
+- **`agent-history ship`** sends redacted Records to a hub
+  (`AGENT_HISTORY_HUB_INGEST`, optional `AGENT_HISTORY_HUB_KEY`). Every record
+  is redacted unconditionally, ignoring the local `AGENT_HISTORY_REDACT`.
+  New records go into immutable JSONL batches in an outbox and are uploaded
+  with `rsync --remove-source-files`; a record is marked shipped only after
+  its batch has been delivered, so a failed upload loses and duplicates
+  nothing. `--dry-run` reports counts only; `--backfill-from-index` also
+  exports chunks already in the local index (watermarked). Overlapping runs
+  no-op under a lock, and the SessionEnd/PreCompact `trigger` ships after
+  indexing when the destination is set.
+- **Machine provenance**: a `machine` column on chunks (added in place, no
+  re-embed; old rows count as this machine), `config.machine_id()`
+  (`AGENT_HISTORY_MACHINE` or the short hostname), `Record.machine`, a
+  `search --machine` filter and `--exclude-machine`, and `@machine` on results
+  and in `show` when it is not the local one. `doctor` lists per-machine counts.
+- **Hub mode**: `AGENT_HISTORY_INBOX` enables an inbox adapter reading
+  `<inbox>/<machine>/*.jsonl` (the machine is the directory name, never a
+  field in the file); consumed batches move to `.processed/` only after the
+  index run commits. `AGENT_HISTORY_HUB=1` indexes only the inbox and forces
+  redaction on.
+- **Remote search**: `AGENT_HISTORY_REMOTE=ssh://user@host[:port]` (and
+  `AGENT_HISTORY_REMOTE_KEY`). `search` merges local and hub results by
+  reciprocal-rank fusion (hub only when there is no local index) and fails
+  open with a one-line warning if the hub is unreachable; `show` falls back to
+  the hub. `--local` / `--hub` force one side.
+- **`agent-history serve-ssh`** for `command="...",restrict` in the hub's
+  authorized_keys: only `search` and `show`, validated by the normal parser,
+  run in-process, never through a shell.
+- **Tenancy**: one index file per tenant (`inbox/<tenant>/<machine>/`,
+  `tenants/<tenant>/`), `serve-ssh --tenants a,b` fixes which tenants a read
+  key can open (from the forced command, never from the client), `--tenant`
+  narrows within that list, multi-tenant searches merge and label results.
+- **Session identity** (#28): every session gets a tool-owned, immutable
+  `session_uid`, a UUIDv5 over agent, machine and source id (plus the origin
+  path for memory/doc pseudo-sessions, so `memory:MEMORY` no longer collides
+  across projects). New `sessions` and `session_aliases` tables hold the
+  source ids as metadata and aliases. Claude Code remote-control sessions are
+  linked to their `cse_…` / `session_…` ids from the transcript's
+  `bridge-session` line or `~/.claude/sessions/*.json`; when two sessions
+  prove to be one, the earliest stays canonical. `show`, `purge --session`
+  and `store.resolve_session()` accept a uid, a raw id or any alias, and
+  `search --json` / `show --json` include `session_uid`. Shipped records
+  carry `session_uid` and `aliases` (optional fields, wire format still
+  `v: 1`). The hub always derives the uid from the sending machine's inbox
+  directory and keeps a shipped uid only when it matches, so the inbox
+  directory must be named after the machine's `AGENT_HISTORY_MACHINE`.
+  Forks are recorded in `sessions.meta` (`fork_of` / `forks`), not as
+  aliases. `purge --session` lists every linked uid, raw id and alias it
+  reaches before deleting anything.
+- **Chunk provenance**: new chunks record `record_id`, `chunk_ordinal`,
+  `char_start` and `char_end` (offsets into the source record), groundwork
+  for scrubbing secrets that cross a chunk boundary. Existing chunks keep
+  NULLs.
+- **`agent-history mcp`: the hub over MCP** (#28), for claude.ai through an
+  MCP router. Tools: `history_recall` (search, `k` capped at 20, 700-char
+  excerpts, no origin paths), `history_show` (a session, at most 50 messages
+  of 1500 chars) and `history_record` (append-only chat records: title,
+  summary, decisions, findings, links, chat URL, project). Records are
+  redacted and written as immutable batches into the tenant's inbox under
+  the token's machine name, agent `claude-ai-chat`, so the indexer handles
+  them like shipped Records. Streamable HTTP (stateless, JSON responses) on
+  127.0.0.1:8765, non-loopback refused without `--allow-non-loopback`;
+  `--stdio` for local use. Bearer tokens with `read` or `write` scope and
+  exactly one tenant, stored as SHA-256 hashes in a `0600` file
+  (`agent-history mcp token add|list|revoke`, reloaded on change) or given
+  in the environment; constant-time comparison, 401 before MCP, tool list
+  filtered by scope, per-token rate limits. Session ids use `session_uid`
+  and `store.resolve_session` when the index has them. Optional dependency:
+  `agent-history[mcp]`. Example unit: `deploy/hub/agent-history-mcp.service`;
+  draft claude.ai profile instruction: `docs/claude-ai-profile-instruction.md`.
+
+- **`agent-history import claude-ai <export-dir>`** backfills claude.ai chats
+  from the official data export (#28). Chat text, conversation titles and
+  summaries, extracted attachment text (capped at 100k characters each),
+  project docs and instructions, memories and Claude Design chats are indexed
+  under agent `claude-ai`, with the conversation uuid as session id and
+  `claude.ai` / `claude.ai/project/<name>` as the location. Re-importing a
+  newer export adds only new text via the existing content-hash dedup.
+  `--dry-run` parses and counts without the index or Ollama. The
+  conversations file is streamed, so a 180 MB export parses in ~5 s at
+  ~100 MB peak memory.
+
+### Changed
+- `reindex` now also refuses (without `--force`) to wipe imported claude.ai
+  chunks: no adapter re-reads an export, so the index is their only copy.
+- Store rows carry the machine as their eighth column and the canonical
+  session uid as their ninth, so the distance now follows at index 9
+  (internal; the JSON output gains `machine` and `session_uid`).
+- An existing index is upgraded in place on first open: columns and tables
+  are added and uids backfilled in one pass (about 3.6 s for a synthetic
+  94k-chunk index), with no re-embedding and no deletes.
+
 ### Fixed
 - **Hybrid search's full-text half works on natural-language queries.** Terms
   were joined with FTS5's implicit AND, so a prose query matched only chunks

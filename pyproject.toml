@@ -1,6 +1,6 @@
 [project]
 name = "agent-history"
-version = "0.16.0"
+version = "0.17.0"
 description = "Local semantic search over AI coding agent session transcripts, using Ollama embeddings and sqlite-vec"
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,6 +25,11 @@ Issues = "https://github.com/d3layd/agent-history/issues"
 [project.scripts]
 agent-history = "agent_history.cli:main"
 
+[project.optional-dependencies]
+mcp = [
+    "mcp>=2.3,<3",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -34,6 +39,7 @@ packages = ["src/agent_history"]
 
 [dependency-groups]
 dev = [
+    "mcp>=2.3,<3",
     "pytest>=8",
 ]
 

@@ -253,3 +253,31 @@ def test_scrub_is_idempotent(transcripts, fake_embed, monkeypatch, capsys):
     assert scrub.run(yes=True) == 0
     assert "no secrets found" in capsys.readouterr().out
     assert len(fake_embed) == calls
+
+
+# The known gap (hub note, 2026-10-27): bare tokens with no NAME= in front.
+OPS = "".join(["ops_", "eyJzaWduSW5BZGRyZXNzIjoibXkuMXBhc3N3b3JkLmNvbSIsInVzZXJBdXRoIjp7Im1ldGhvZCI6IlNSUGct"])
+SCRB = "".join(["scrb_", "agt_", "7Qm2Xv9LpR4sT8wY1zB6"])
+
+
+@pytest.mark.parametrize("text,cls", [
+    (f"the service account is {OPS} for now", "onepassword_token"),
+    (f"op signin with\n{OPS}\nthen retry", "onepassword_token"),
+    (f"scribe agent key {SCRB} (rotate later)", "scribe_key"),
+    (f"curl -H 'X-Scribe: {SCRB}' https://scribe.example", "scribe_key"),
+])
+def test_bare_1password_and_scribe_tokens_are_redacted(text, cls):
+    clean, found = redact.redact(text)
+    assert OPS not in clean and SCRB not in clean
+    assert found[cls] == 1
+    assert f"[REDACTED:{cls}]" in clean
+
+
+@pytest.mark.parametrize("text", [
+    "sudo -u ops_a0dc6f0c crontab -l",
+    "/home/ops_a0dc6f0c/ops-library/scripts",
+    "the ops_library repo and ops_notes.md",
+    "scrb_agt_short is not a key",
+])
+def test_names_that_merely_start_like_tokens_survive(text):
+    assert redact.redact(text)[0] == text

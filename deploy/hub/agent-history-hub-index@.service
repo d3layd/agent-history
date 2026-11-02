@@ -1,0 +1,29 @@
+# Index one tenant's inbox on the hub. Instantiate per tenant:
+#   systemctl enable --now agent-history-hub-index@dennis.timer
+#   systemctl enable --now agent-history-hub-index@dennis.path
+#
+# One tenant = one index file: AGENT_HISTORY_HOME is the tenant's own data
+# home, AGENT_HISTORY_INBOX the directory its machines upload into
+# (<inbox>/<tenant>/<machine>/*.jsonl). Nothing here can see another tenant.
+[Unit]
+Description=agent-history hub: index the %i inbox
+# Ollama runs on this box, loopback only.
+After=network.target ollama.service
+
+[Service]
+Type=oneshot
+User=ahub
+Environment=AGENT_HISTORY_HUB=1
+Environment=AGENT_HISTORY_INBOX=/home/ahub/inbox/%i
+Environment=AGENT_HISTORY_HOME=/home/ahub/tenants/%i
+Environment=OLLAMA_URL=http://127.0.0.1:11434
+# `trigger` takes the index lock (overlapping runs no-op) and --if-changed
+# exits before touching Ollama when no batch is waiting.
+ExecStart=/home/ahub/.local/bin/agent-history trigger hub-%i --foreground --if-changed
+
+# Hardening: this unit only needs its own inbox and index.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ahub/inbox/%i /home/ahub/tenants/%i

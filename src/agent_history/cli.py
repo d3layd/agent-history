@@ -7,11 +7,13 @@ import json
 import sys
 
 from . import (__version__, adapters, config, embed, index, inject, scrub,
-               search, show, store, trigger, viewer)
+               search, ship, show, store, trigger, viewer)
 
 COMMANDS = {"index", "reindex", "reembed", "search", "sources", "doctor",
             "datadir", "trigger", "show", "serve", "inject", "docs",
-            "purge", "strict", "scrub"}
+            "purge", "strict", "scrub", "ship", "ship-jobs", "confirm-indexed",
+            "boat-export",
+            "serve-ssh", "mcp", "import", "notes"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -48,6 +50,15 @@ def _build_parser() -> argparse.ArgumentParser:
     scr.add_argument("--yes", action="store_true",
                      help="rewrite the affected chunks; without it, only previews")
 
+    imp = sub.add_parser(
+        "import",
+        help="backfill from a data export (claude.ai), deduplicated on re-import")
+    imp.add_argument("kind", choices=["claude-ai"],
+                     help="export format")
+    imp.add_argument("path", help="the unpacked export directory")
+    imp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="parse and count only — no index, no Ollama")
+
     strict = sub.add_parser(
         "strict", help="compliance profile: injection off + scoped to project")
     strict.add_argument("action", nargs="?", default="status",
@@ -66,6 +77,124 @@ def _build_parser() -> argparse.ArgumentParser:
     trig.add_argument("--foreground", action="store_true",
                       help="wait for indexing instead of detaching")
 
+    shp = sub.add_parser(
+        "ship", help="send redacted records to the hub "
+                     "(AGENT_HISTORY_HUB_INGEST)")
+    shp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="report what would be sent; write and upload nothing")
+    shp.add_argument("--backfill-from-index", action="store_true",
+                     dest="backfill",
+                     help="also send chunks already in the local index "
+                          "(covers transcripts no longer on disk)")
+
+    sjb = sub.add_parser(
+        "ship-jobs", help="send claude -p job transcripts to the hub "
+                          "(AGENT_HISTORY_JOBS_DIR, AGENT_HISTORY_HUB_INGEST)")
+    sjb.add_argument("--final", metavar="JOB_ID",
+                     help="ship one job and exit 0 only once the hub has "
+                          "confirmed every record of it (the runner's last step)")
+    sjb.add_argument("--wait", type=int, default=300, metavar="SECONDS",
+                     help="with --final: how long to wait for another ship "
+                          "to finish (default 300)")
+    sjb.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="report what would be sent; write and upload nothing")
+
+    cix = sub.add_parser(
+        "confirm-indexed",
+        help="has the hub indexed a claude -p job? 0 yes, 1 not yet or partial, "
+             "2 config or credential error (run on Clamps' side, never as claude-jobs)")
+    cix.add_argument("--job", required=True, metavar="JOB_ID")
+    cix.add_argument("--json", action="store_true", dest="as_json")
+    cix.add_argument("--receipt", metavar="FILE",
+                     help="also write the result JSON to FILE (atomically)")
+    cix.add_argument("--tenant", help="hub tenant to read (a key that reads several)")
+    cix.add_argument("--local", action="store_true",
+                     help="read this machine's index instead (on the hub itself)")
+
+    bxp = sub.add_parser(
+        "boat-export", help="pull Boat VMs' Claude Code transcripts into a job and "
+                            "ship them; 0 safe to delete (arrived and indexed), "
+                            "4 arrived, awaiting index confirmation")
+    bxp.add_argument("--job", required=True, metavar="JOB_ID",
+                     help="the claude -p job the VMs belong to")
+    bxp.add_argument("vms", nargs="+", metavar="VM_ID", help="Boat sandbox ids")
+    bxp.add_argument("--check", action="store_true",
+                     help="re-confirm earlier exports from their receipts "
+                          "without calling Boat")
+    bxp.add_argument("--allow-empty", action="store_true", dest="allow_empty",
+                     help="accept a VM with no transcripts")
+    bxp.add_argument("--wait", type=int, default=300, metavar="SECONDS",
+                     help="how long the final ship waits for the ship lock")
+    bxp.add_argument("--boat-timeout", type=int, default=180, metavar="SECONDS",
+                     help="timeout for each Boat API call (default 180)")
+    bxp.add_argument("--index-receipt", metavar="FILE", dest="index_receipt",
+                     help="the runner's confirm-indexed result (default: "
+                          "<jobs>/<job_id>/index-confirmed.json)")
+
+    nts = sub.add_parser("notes", help="session notes: summaries kept apart "
+                                        "from transcripts, each linked to its source")
+    nts_sub = nts.add_subparsers(dest="notes_action", required=True)
+    nadd = nts_sub.add_parser("add", help="write one note (append-only)")
+    nadd.add_argument("--title", required=True)
+    nadd.add_argument("--summary", required=True)
+    nadd.add_argument("--decision", action="append", dest="decisions", default=[])
+    nadd.add_argument("--finding", action="append", dest="findings", default=[])
+    nadd.add_argument("--link", action="append", dest="links", default=[])
+    nadd.add_argument("--chat-url", dest="chat_url",
+                      help="source: a https://claude.ai/chat/<uuid> conversation")
+    nadd.add_argument("--duet-channel", dest="duet_channel",
+                      help="source: a Duet channel id (with --duet-message)")
+    nadd.add_argument("--duet-message", dest="duet_message",
+                      help="the Duet message id that starts the span")
+    nadd.add_argument("--session", dest="session_id",
+                      help="source: a Claude Code session id")
+    nadd.add_argument("--job", dest="job_id", help="with --session: the claude -p job id")
+    nadd.add_argument("--session-machine", dest="session_machine",
+                      help="with --session: the machine it ran on (default: this one)")
+    nadd.add_argument("--span-start", dest="span_start")
+    nadd.add_argument("--span-end", dest="span_end")
+    nadd.add_argument("--corrects", help="the note id this one corrects")
+    nsearch = nts_sub.add_parser("search", help="search notes only")
+    nsearch.add_argument("query", nargs="+")
+    nsearch.add_argument("-k", type=int, default=8)
+    nsearch.add_argument("--mode", choices=["hybrid", "text", "vector"], default="hybrid")
+    nsearch.add_argument("--json", action="store_true", dest="as_json")
+    nsweep = nts_sub.add_parser("sweep", help="note sessions that ended or went idle")
+    nsweep.add_argument("--idle-minutes", type=float, default=5.0, dest="idle_minutes")
+    nsweep.add_argument("--summarizer",
+                        help="default: claude (a claude -p call with a small model, "
+                             "the machine's Claude login, never ANTHROPIC_API_KEY); "
+                             "or a command reading a JSON span on stdin and printing "
+                             "{title, summary, ...}. A failed summary falls back to "
+                             "first prompt + last message, marked fallback")
+    nsweep.add_argument("--session", help="note this session now (session end)")
+    nsweep.add_argument("--dry-run", action="store_true", dest="dry_run")
+    nts_sub.add_parser("ship", help="upload queued notes to the hub")
+    nscrub = nts_sub.add_parser(
+        "scrub", help="admin only: replace a leaked secret in one note (and its "
+                      "search index), with an audit record that never holds the secret")
+    nscrub.add_argument("note_id")
+    nscrub.add_argument("--pattern", required=True,
+                        help="the leaked text; '-' reads it from stdin (keeps it "
+                             "out of ps and shell history)")
+    nscrub.add_argument("--reason", required=True, help="why, for the audit trail")
+    nts_sub.add_parser("audit", help="list the notes audit trail (scrubs)")
+    nmig = nts_sub.add_parser(
+        "migrate-records", help="hub: move history_record entries out of the transcript "
+                                "index into notes (dry run unless --yes)")
+    nmig.add_argument("--yes", action="store_true", help="really move them")
+    nts_sub.add_parser("index", help="hub: index notes waiting in the inbox")
+    nts_sub.add_parser("hook", help="Claude Code SessionEnd hook: sweep that "
+                                    "session in the background")
+
+    ssh = sub.add_parser(
+        "serve-ssh",
+        help="for authorized_keys command=: run only search/show from "
+             "$SSH_ORIGINAL_COMMAND")
+    ssh.add_argument("--tenants", metavar="A[,B...]",
+                     help="tenant indexes this key may read (hub only); "
+                          "taken from the forced command, never from the client")
+
     find = sub.add_parser("search", help="search the index")
     find.add_argument("query", nargs="+")
     find.add_argument("-k", type=int, default=8, help="results to return (default 8)")
@@ -75,6 +204,12 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="hybrid (default), vector, or text (no Ollama needed)")
     find.add_argument("--sort", choices=search.SORTS, default="relevance",
                       help="relevance (default; near-ties favour newer) or newest")
+    find.add_argument("--machine", help="only chunks from this machine")
+    find.add_argument("--exclude-machine", action="append", metavar="MACHINE",
+                      help="leave out chunks from this machine (repeatable)")
+    find.add_argument("--tenant", help="hub tenant to search (default: all "
+                                       "this key may read)")
+    _add_where(find)
     find.add_argument("--full", action="store_true", help="print full chunk text")
     find.add_argument("--json", action="store_true", dest="as_json")
 
@@ -86,6 +221,8 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="centre the window on this timestamp instead of the end")
     ctx.add_argument("--limit", type=int, default=40,
                      help="chunks to print (default 40)")
+    ctx.add_argument("--tenant", help="hub tenant the conversation is in")
+    _add_where(ctx)
     ctx.add_argument("--json", action="store_true", dest="as_json")
 
     serve = sub.add_parser(
@@ -105,7 +242,85 @@ def _build_parser() -> argparse.ArgumentParser:
     doc.add_argument("action", nargs="?", default="list",
                      choices=["add", "remove", "list"])
     doc.add_argument("path", nargs="?", help="directory, for add/remove")
+
+    mcp = sub.add_parser(
+        "mcp", help="MCP server for history_recall / history_show / "
+                    "history_record (needs the [mcp] extra)")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command")
+    mserve = mcp_sub.add_parser(
+        "serve", help="run the server (default: Streamable HTTP on 127.0.0.1)")
+    # `mcp --port 1` and `mcp serve --port 1` both work; the subcommand's
+    # copies default to SUPPRESS so they never overwrite the parent's values.
+    for target, fallback in ((mcp, None), (mserve, argparse.SUPPRESS)):
+        def default(value, fallback=fallback):
+            return value if fallback is None else fallback
+        target.add_argument("--stdio", action="store_true", default=default(False),
+                            help="speak stdio instead of HTTP; the token comes "
+                                 "from AGENT_HISTORY_MCP_TOKEN")
+        target.add_argument("--host", default=default("127.0.0.1"),
+                            help="bind address (default 127.0.0.1)")
+        target.add_argument("--port", type=_port, default=default(8765),
+                            help="port (default 8765)")
+        target.add_argument("--allow-non-loopback", action="store_true",
+                            default=default(False),
+                            help="permit a non-loopback --host (only behind an "
+                                 "authenticating TLS proxy)")
+    mtok = mcp_sub.add_parser("token", help="manage bearer tokens (hashes only "
+                                            "are stored, in a 0600 file)")
+    mtok_sub = mtok.add_subparsers(dest="token_command", required=True)
+    tadd = mtok_sub.add_parser("add", help="create a token and print it once")
+    tadd.add_argument("name")
+    tadd.add_argument("--scope", required=True, action="append",
+                      choices=["read", "write"],
+                      help="read (recall/show) or write (record); repeatable, "
+                           "but prefer one scope per token")
+    tadd.add_argument("--tenant", help="the one tenant index this token opens "
+                                       "(omit on a hub without tenants)")
+    tadd.add_argument("--machine", help="provenance for records written with "
+                                        "this token (default mcp-<name>)")
+    mtok_sub.add_parser("list", help="names, scopes and tenants (no secrets)")
+    trev = mtok_sub.add_parser("revoke", help="delete a token")
+    trev.add_argument("name")
     return parser
+
+
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    from . import mcp_auth, mcp_server
+
+    if args.mcp_command in (None, "serve"):
+        return mcp_server.serve(
+            transport="stdio" if args.stdio else "http", host=args.host,
+            port=args.port, allow_non_loopback=args.allow_non_loopback)
+    try:
+        if args.token_command == "add":
+            token = mcp_auth.add_token(args.name, args.scope, args.tenant,
+                                       args.machine)
+            print(token)
+            print(f"stored the hash of token {args.name!r} in "
+                  f"{mcp_auth.tokens_path()}; the token itself is shown only "
+                  "this once", file=sys.stderr)
+            return 0
+        if args.token_command == "list":
+            for entry in mcp_auth.list_tokens():
+                print(json.dumps(entry))
+            return 0
+        if mcp_auth.revoke_token(args.name):
+            print(f"revoked {args.name!r}")
+            return 0
+        print(f"no token named {args.name!r}", file=sys.stderr)
+        return 1
+    except mcp_auth.TokenConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _add_where(parser: argparse.ArgumentParser) -> None:
+    """--local / --hub: pin a command to one side when AGENT_HISTORY_REMOTE is set."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--local", dest="where", action="store_const",
+                       const="local", help="only this machine's index")
+    group.add_argument("--hub", dest="where", action="store_const",
+                       const="hub", help="only the hub (AGENT_HISTORY_REMOTE)")
 
 
 def _port(value: str) -> int:
@@ -214,6 +429,14 @@ def _cmd_purge(args) -> int:
         return 1
 
     target = "the ENTIRE index" if args.everything else "matching chunks"
+    if args.session:
+        # --session reaches every session linked to the one named, so say
+        # exactly which ids that covers before anything can be deleted.
+        linked = store.purge_session_ids(db, args.session)
+        if len(linked) > 1:
+            print(f"--session {args.session} covers {len(linked)} linked id(s):")
+            for kind, value in linked:
+                print(f"  {kind:8} {value}")
     if not args.yes:
         print(f"would delete {len(rows)} chunk(s) ({target}).")
         print("this is permanent and cannot be undone. re-run with --yes to do it.")
@@ -221,6 +444,18 @@ def _cmd_purge(args) -> int:
     removed = store.purge(db, rows)
     print(f"purged {removed} chunk(s) — permanently deleted from the index.")
     return 0
+
+
+def _cmd_import(kind: str, path: str, *, dry_run: bool) -> int:
+    from pathlib import Path
+
+    from .adapters.claude_ai import ClaudeAiExport
+
+    root = Path(path).expanduser()
+    if not root.is_dir():
+        print(f"error: not a directory: {root}", file=sys.stderr)
+        return 1
+    return index.run_import(ClaudeAiExport(root), dry_run=dry_run)
 
 
 def _cmd_strict(action: str) -> int:
@@ -260,6 +495,15 @@ def _cmd_doctor() -> int:
                              else "off — secrets are indexed verbatim "
                                   "(AGENT_HISTORY_REDACT=on or strict to enable)"))
 
+    print(f"machine:    {config.machine_id()}")
+    if config.hub_mode():
+        print(f"hub:        THIS install is a hub (inbox {config.inbox_dir()}; "
+              "redaction forced)")
+    if config.hub_ingest():
+        print(f"ship to:    {config.hub_ingest()}  (agent-history ship)")
+    if config.remote_url():
+        print(f"search hub: {config.remote_url()}")
+
     ok, detail = embed.reachable()
     print(f"ollama up:  {'yes' if ok else 'NO'} ({detail})")
 
@@ -298,6 +542,9 @@ def _cmd_doctor() -> int:
     print(f"chunks:     {info['total']}")
     for agent, count in info["per_agent"].items():
         print(f"              {agent}: {count}")
+    if len(info["per_machine"]) > 1:
+        for name, count in info["per_machine"].items():
+            print(f"              @{name}: {count}")
     print(f"built with: {info['model']} ({info['dimension']}-dim)")
     last = store.get_meta(db, "redact_last")
     if last:
@@ -319,6 +566,78 @@ def _cmd_doctor() -> int:
     return 0 if ok else 1
 
 
+def _cmd_notes(args: argparse.Namespace) -> int:
+    from . import notes
+
+    action = args.notes_action
+    if action == "add":
+        try:
+            source = notes.make_source(
+                chat_url=args.chat_url, duet_channel_id=args.duet_channel,
+                duet_message_id=args.duet_message, session_id=args.session_id,
+                machine=(args.session_machine or config.machine_id())
+                if (args.session_id or args.job_id) else None,
+                job_id=args.job_id)
+            note = notes.build(title=args.title, summary=args.summary, source=source,
+                               decisions=args.decisions, findings=args.findings,
+                               links=args.links, span_start=args.span_start,
+                               span_end=args.span_end, corrects=args.corrects)
+        except notes.NoteError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"{note['note_id']}: {notes.save(note)}")
+        return 0
+    if action == "search":
+        try:
+            hits = notes.search(" ".join(args.query), k=args.k, mode=args.mode)
+        except notes.NoteError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.as_json:
+            print(json.dumps(hits, ensure_ascii=False, indent=1))
+            return 0
+        if not hits:
+            print("no notes match")
+        for n, hit in enumerate(hits, 1):
+            show = hit["show"]
+            print(f"#{n}  {hit['created_at']}  {hit['note_id']}  @{hit['machine']}")
+            print(f"    {hit['title']}")
+            if show:
+                print(f"    show: {show['session']}"
+                      + (f" --around {show['around']}" if show.get("around") else ""))
+            print()
+        return 0
+    if action == "sweep":
+        return notes.sweep(idle_minutes=args.idle_minutes, summarizer=args.summarizer,
+                           session=args.session, dry_run=args.dry_run)
+    if action == "ship":
+        return notes.ship_outbox()
+    if action == "scrub":
+        pattern = sys.stdin.read().rstrip("\n") if args.pattern == "-" else args.pattern
+        try:
+            done = notes.scrub(args.note_id, pattern, args.reason)
+        except notes.NoteError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"{done['note_id']}: {done['replacements']} replacement(s) in "
+              f"{', '.join(done['fields'])}; {done['archive_files']} archive file(s) "
+              f"rewritten; audit record added")
+        return 0
+    if action == "migrate-records":
+        return notes.migrate_records(apply=args.yes)
+    if action == "audit":
+        for entry in notes.audit_log():
+            print(f"{entry['at']}  {entry['action']}  {entry['note_id']}  by "
+                  f"{entry['actor']}  ({entry['replacements']} in "
+                  f"{', '.join(entry['fields'])})  {entry['reason']}")
+        return 0
+    if action == "index":
+        return notes.index_inbox()
+    if action == "hook":
+        return notes.hook_session_end()
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     # Hooks and cron redirect stdout to a log file, which makes Python
     # block-buffer it. Without this, a long index writes nothing for minutes and
@@ -330,7 +649,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(_normalise(list(sys.argv[1:] if argv is None else argv)))
+    return dispatch(parser, args)
 
+
+def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run a parsed command. Shared with `serve-ssh`, which parses its own."""
     if args.command is None:
         parser.print_help()
         return 0
@@ -358,16 +681,46 @@ def main(argv: list[str] | None = None) -> int:
                 k=args.k,
                 cwd=args.cwd,
                 agent=args.agent,
+                machine=args.machine,
+                exclude_machine=args.exclude_machine,
                 mode=args.mode,
                 sort=args.sort,
                 full=args.full,
                 as_json=args.as_json,
+                where=args.where,
+                tenant=args.tenant,
             )
         if args.command == "show":
             return show.run(args.target, around=args.around,
-                            limit=args.limit, as_json=args.as_json)
+                            limit=args.limit, as_json=args.as_json,
+                            where=args.where, tenant=args.tenant)
+        if args.command == "ship":
+            return ship.run(dry_run=args.dry_run, backfill=args.backfill)
+        if args.command == "ship-jobs":
+            from . import jobs
+            return jobs.run(args.final, dry_run=args.dry_run, wait=args.wait)
+        if args.command == "confirm-indexed":
+            from . import confirm
+            return confirm.run(args.job, as_json=args.as_json, receipt=args.receipt,
+                               tenant=args.tenant, local=args.local)
+        if args.command == "boat-export":
+            from . import boat_export
+            from pathlib import Path
+            receipt = Path(args.index_receipt) if args.index_receipt else None
+            if args.check:
+                return boat_export.check(args.job, args.vms, index_receipt=receipt)
+            return boat_export.run(args.job, args.vms, allow_empty=args.allow_empty,
+                                   wait=args.wait, index_receipt=receipt,
+                                   boat=boat_export.Boat(timeout=args.boat_timeout))
+        if args.command == "notes":
+            return _cmd_notes(args)
+        if args.command == "serve-ssh":
+            from . import serve_ssh
+            return serve_ssh.run(args.tenants)
         if args.command == "serve":
             return viewer.run(port=args.port)
+        if args.command == "mcp":
+            return _cmd_mcp(args)
         if args.command == "inject":
             if args.action == "run":
                 return inject.run_hook()
@@ -384,6 +737,9 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_strict(args.action)
         if args.command == "scrub":
             return scrub.run(yes=args.yes)
+
+        if args.command == "import":
+            return _cmd_import(args.kind, args.path, dry_run=args.dry_run)
     except (store.StoreError, embed.EmbedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
