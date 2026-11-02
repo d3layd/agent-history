@@ -1,0 +1,24 @@
+# systemd USER unit: write session notes for Claude Code sessions (and
+# claude -p jobs) that went idle, and ship them with the user's hub settings.
+#   cp agent-history-notes-sweep.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now agent-history-notes-sweep.timer
+#
+# Summaries come from a model by default: one `claude -p --model haiku` call
+# per idle session, using this user's own Claude login (on claude-jobs, the
+# subscription token in its env). ANTHROPIC_API_KEY is removed from the
+# call's environment, so the production key is never used. The transcript is
+# redacted before the call and the summary again after. If the call fails,
+# the note falls back to first prompt + last message and is marked fallback.
+# Optional, in ~/.config/agent-history/env:
+#   AGENT_HISTORY_NOTES_MODEL=haiku
+#   AGENT_HISTORY_CLAUDE_BIN=/home/claude-jobs/.local/bin/claude
+[Unit]
+Description=agent-history: session notes for idle sessions
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/agent-history/env
+ExecStart=%h/.local/bin/agent-history notes sweep --idle-minutes 5
+# A failed summarizer is retried next round; not worth a red unit.
+SuccessExitStatus=1
+Nice=10

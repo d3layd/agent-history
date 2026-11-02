@@ -107,6 +107,11 @@ def _anything_changed(stamp: Path) -> bool:
     """Whether any transcript is newer than the last run's stamp."""
     if not stamp.exists():
         return True
+    if config.hub_mode():
+        from . import notes
+
+        if notes.inbox_pending():  # session notes waiting, a queue like the inbox
+            return True
     since = stamp.stat().st_mtime
     from . import adapters
 
@@ -188,10 +193,19 @@ def run(label: str, *, if_changed: bool = False, foreground: bool = False,
             original = sys.stdout, sys.stderr
             sys.stdout = sys.stderr = handle
             try:
-                code = index.run()
-            except Exception as exc:  # noqa: BLE001 - a hook must never crash loudly
-                handle.write(f"index failed: {exc}\n")
-                code = 1
+                try:
+                    code = index.run()
+                except Exception as exc:  # noqa: BLE001 - a hook must never crash loudly
+                    handle.write(f"index failed: {exc}\n")
+                    code = 1
+                if config.hub_mode():
+                    # Session notes go to their own store, never the transcript index.
+                    try:
+                        from . import notes
+
+                        notes.index_inbox()
+                    except Exception as exc:  # noqa: BLE001
+                        handle.write(f"notes index failed: {exc}\n")
             finally:
                 sys.stdout, sys.stderr = original
         config.secure_file(log)
