@@ -118,6 +118,26 @@ agent-history boat-export --job "$JOB" "$VM"      # 4 = arrived, awaiting index 
 agent-history boat-export --job "$JOB" --check "$VM" && boat delete "$VM"
 ```
 
+Or in one guarded step, `agent-history boat-archive --job "$JOB" "$VM"`:
+copies back if needed, and only once arrived and indexed stops the VM and
+records `ARCHIVED.json` (4 = arrived, awaiting index confirmation; it never
+deletes). Start job VMs named for the job: `boat new --name "$JOB <purpose>"`.
+
+### Daily sweep (needs Dennis's OK to install)
+
+A daily cron, as the user that holds the Boat login and can read the job
+folders (claude-jobs), posting its output verbatim to Telegram through
+Clamps' Hermes (`no_agent=true`, `deliver=telegram`, like `claude-job notify
+--drain`):
+
+```bash
+sudo -n -u claude-jobs /home/claude-jobs/.local/bin/agent-history boat-archive --sweep
+```
+
+Empty output means nothing to report. Each line is one job VM that is
+stopped, expired or gone with transcripts not confirmed copied, with the days
+Boat still keeps its data and the `boat-archive` command that fixes it.
+
 ## Verify
 
 ```bash

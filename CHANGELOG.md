@@ -12,6 +12,16 @@ they have no corresponding tags.
 ## [Unreleased]
 
 ### Added
+- **`agent-history boat-archive --job <job_id> <vm_id>...`**: the guarded
+  final stop for a job's Boat VMs. Copies back first (`boat-export`) when a
+  VM's copy isn't confirmed, and only once it has arrived and the runner's
+  `confirm-indexed` result covers it, stops the VM (Boat keeps a stopped
+  VM's data 14 days) and records `vms/<vm_id>/ARCHIVED.json`; otherwise it
+  refuses and leaves the VM stopped. Never deletes. **`boat-archive
+  --sweep`**: the daily alert for job VMs stopped, expired or gone with
+  transcripts not confirmed copied (empty output when all is well). VMs are
+  tied to jobs by `job.json` `vms`, earlier exports, and Boat sandbox names
+  that contain the job id.
 - **`agent-history ship-jobs`**: ships `claude -p` job transcripts (Claude
   Code session files and the stream-json `transcript.jsonl`) from
   `AGENT_HISTORY_JOBS_DIR`, tagged with the job id, owning Duet channel and
