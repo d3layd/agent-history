@@ -148,6 +148,17 @@ def check(job_id: str, reader) -> dict:
         vm_rows = reader.show(session, limit=1)
         checks[f"show {session}"] = bool(vm_rows) and vm_rows[0].get("session_id") == session
         checks[f"vm header {vm}"] = bool(_starts(vm_headers, f"[claude-jobs vm] {job_id} vm {vm}"))
+    # Boat VM copies the hub has indexed, by session: the "Copy: sha256" line
+    # of each indexed VM header. boat-export matches its receipt against it.
+    vm_copies: dict[str, list[str]] = {}
+    for row in vm_headers:
+        text = row.get("text") or ""
+        vm = text.split(" vm ", 1)[1].split()[0] if " vm " in text else ""
+        digest = (_field(text, "Copy") or [""])[0].replace("sha256", "").strip()
+        if vm and digest:
+            vm_copies.setdefault(f"{job_id}/vm/{vm}", [])
+            if digest not in vm_copies[f"{job_id}/vm/{vm}"]:
+                vm_copies[f"{job_id}/vm/{vm}"].append(digest)
     lookup: dict[str, bool] = {}
     for uuid in claude_ids:
         found = reader.search(uuid, k=10)
@@ -166,7 +177,7 @@ def check(job_id: str, reader) -> dict:
             "checked_at": datetime.datetime.now(datetime.timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"),
             "sessions": sessions, "claude_session_ids": claude_ids,
-            "checks": checks, "missing": missing,
+            "checks": checks, "missing": missing, "vm_copies": vm_copies,
             # history_show(session=<uuid>) needs the hub's `claude` alias kind;
             # reported, not gated, so an older hub does not block a job.
             "claude_lookup": lookup}
