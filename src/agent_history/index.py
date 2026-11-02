@@ -367,7 +367,7 @@ def _import_dry_run(source) -> int:
         if record.timestamp:
             first = min(first or record.timestamp, record.timestamp)
             last = max(last, record.timestamp)
-        for piece in chunk_text(record.text):
+        for piece in textproc.chunk_text(record.text):
             chunks += 1
             hashes.add(hashlib.sha256(piece.encode("utf-8")).hexdigest())
     elapsed = time.time() - started
