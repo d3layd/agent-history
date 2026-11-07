@@ -147,7 +147,12 @@ def _build_parser() -> argparse.ArgumentParser:
     nadd.add_argument("--duet-message", dest="duet_message",
                       help="the Duet message id that starts the span")
     nadd.add_argument("--session", dest="session_id",
-                      help="source: a Claude Code session id")
+                      help="source: a Claude Code session id, or with --provider "
+                           "a hosted session's id")
+    nadd.add_argument("--provider", help="source: a hosted session's provider, with "
+                                         "--session and --session-url")
+    nadd.add_argument("--session-url", dest="session_url",
+                      help="with --provider: the hosted session's exact link")
     nadd.add_argument("--job", dest="job_id", help="with --session: the claude -p job id")
     nadd.add_argument("--session-machine", dest="session_machine",
                       help="with --session: the machine it ran on (default: this one)")
@@ -170,6 +175,12 @@ def _build_parser() -> argparse.ArgumentParser:
     nsweep.add_argument("--session", help="note this session now (session end)")
     nsweep.add_argument("--dry-run", action="store_true", dest="dry_run")
     nts_sub.add_parser("ship", help="upload queued notes to the hub")
+    nprov = nts_sub.add_parser(
+        "providers", help="list the hosted-session providers, or check a new one "
+                          "before adding it to hosted.py (never writes)")
+    nprov.add_argument("--check", metavar="NAME",
+                       help="normalize NAME to a slug and check it for duplicates")
+    nprov.add_argument("--host", help="with --check: the provider's exact host")
     nscrub = nts_sub.add_parser(
         "scrub", help="admin only: replace a leaked secret in one note (and its "
                       "search index), with an audit record that never holds the secret")
@@ -566,6 +577,23 @@ def _cmd_doctor() -> int:
     return 0 if ok else 1
 
 
+def _notes_providers(args: argparse.Namespace) -> int:
+    from . import hosted
+
+    if not args.check:
+        for provider in hosted.PROVIDERS.values():
+            print(f"{provider.slug}  {provider.example}")
+        return 0
+    try:
+        plan = hosted.plan_addition(args.check, args.host or "")
+    except hosted.HostedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"{plan['slug']} on {plan['host']}: not registered yet. Nothing was changed. "
+          "To add it, send a PR adding it to PROVIDERS in hosted.py, with its URL shape.")
+    return 0
+
+
 def _cmd_notes(args: argparse.Namespace) -> int:
     from . import notes
 
@@ -575,9 +603,10 @@ def _cmd_notes(args: argparse.Namespace) -> int:
             source = notes.make_source(
                 chat_url=args.chat_url, duet_channel_id=args.duet_channel,
                 duet_message_id=args.duet_message, session_id=args.session_id,
-                machine=(args.session_machine or config.machine_id())
+                machine=args.session_machine if (args.provider or args.session_url)
+                else (args.session_machine or config.machine_id())
                 if (args.session_id or args.job_id) else None,
-                job_id=args.job_id)
+                job_id=args.job_id, provider=args.provider, session_url=args.session_url)
             note = notes.build(title=args.title, summary=args.summary, source=source,
                                decisions=args.decisions, findings=args.findings,
                                links=args.links, span_start=args.span_start,
@@ -605,6 +634,8 @@ def _cmd_notes(args: argparse.Namespace) -> int:
             if show:
                 print(f"    show: {show['session']}"
                       + (f" --around {show['around']}" if show.get("around") else ""))
+            if hit.get("link"):
+                print(f"    link: {hit['link']}")
             print()
         return 0
     if action == "sweep":
@@ -612,6 +643,8 @@ def _cmd_notes(args: argparse.Namespace) -> int:
                            session=args.session, dry_run=args.dry_run)
     if action == "ship":
         return notes.ship_outbox()
+    if action == "providers":
+        return _notes_providers(args)
     if action == "scrub":
         pattern = sys.stdin.read().rstrip("\n") if args.pattern == "-" else args.pattern
         try:

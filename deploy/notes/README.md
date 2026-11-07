@@ -25,6 +25,14 @@ done
 The `.path` unit watches only the machine directories; the one-minute timer
 picks notes up.
 
+### Hosted sessions
+
+The `hosted-session` source kind needs no migration: `notes.db` stores the kind
+as text with no constraint. After the upgrade, restart `agent-history-mcp` and
+refresh the router the same way, or clients won't see `provider` and
+`session_url`. An index run on an older version moves a hosted note to
+`.processed` without indexing it, so upgrade the hub before any client sends one.
+
 ## A machine that writes notes (MSI, claude-jobs, ...)
 
 The summary is written by a model by default (`claude -p --model haiku`,

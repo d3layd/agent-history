@@ -12,7 +12,8 @@ live in their own store (``notes.db``), never in the transcript index.
   again when the hub indexes it.
 - **Sourced.** Exactly one of: a claude.ai conversation URL; a Duet channel
   id plus the message id that starts the span; a Claude Code session id plus
-  machine (plus the job id for ``claude -p``). Anything else is refused.
+  machine (plus the job id for ``claude -p``); a hosted session's provider,
+  id and link (see ``hosted``). Anything else is refused.
 
 Notes reach a hub as ``inbox/<tenant>/<machine>/notes/*.jsonl``: below the
 directory the transcript reader looks at, and without the ``text`` field it
@@ -38,10 +39,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable
 
-from . import config, embed, redact
+from . import config, embed, hosted, redact
 
 FORMAT = 1
-KINDS = ("claude-ai", "duet", "claude-code", "record")
+KINDS = ("claude-ai", "duet", "claude-code", "record", hosted.KIND)
 RECORD_ORIGIN = "history_record"
 RECORD_SURFACE = "claude-ai-chat"
 _RECORD_SESSION = re.compile(r"^claude-ai-chat-[A-Za-z0-9-]{1,80}$")
@@ -89,6 +90,9 @@ _STOP = frozenset("a an and are as at be but by for from has have how i if in "
                   "which who why with you".split())
 
 
+_HOSTED_FIELDS = "provider, session_id and session_url"
+
+
 class NoteError(ValueError):
     """A note that cannot be accepted as written."""
 
@@ -120,22 +124,38 @@ def _items(name: str, values: object) -> list[str]:
 
 def make_source(*, chat_url: str | None = None, duet_channel_id: str | None = None,
                 duet_message_id: str | None = None, session_id: str | None = None,
-                machine: str | None = None, job_id: str | None = None) -> dict:
+                machine: str | None = None, job_id: str | None = None,
+                provider: str | None = None, session_url: str | None = None) -> dict:
     """The one source a note points back to. Refuses none, several, or a
-    malformed one: a note without a resolvable source is not accepted."""
+    malformed one: a note without a resolvable source is not accepted.
+    ``provider`` or ``session_url`` means a hosted session, and ``session_id``
+    is then that session's id."""
+    raw_session = session_id
+    is_hosted = provider not in (None, "") or session_url not in (None, "")
     chat_url = (chat_url or "").strip()
     channel = (duet_channel_id or "").strip()
     message = (duet_message_id or "").strip()
-    session = (session_id or "").strip()
+    session = "" if is_hosted else (session_id or "").strip()  # hosted.check reads it raw
     machine = (machine or "").strip()
     job = (job_id or "").strip()
-    families = [bool(chat_url), bool(channel or message), bool(session or job)]
+    families = [bool(chat_url), bool(channel or message), bool(session or job or is_hosted)]
     if sum(families) != 1:
         raise NoteError("give exactly one source: a claude.ai chat_url, a Duet "
-                        "channel id + message id, or a Claude Code session id")
+                        "channel id + message id, a Claude Code session id, or a "
+                        "hosted session's provider + session_id + session_url")
+    if is_hosted:
+        if machine or job:
+            raise NoteError("a hosted session has no machine or job id: pass only "
+                            "provider, session_id and session_url")
+        try:
+            slug, sid, url = hosted.check(provider, raw_session, session_url)
+        except hosted.HostedError as exc:
+            raise NoteError(str(exc)) from None
+        return {"kind": hosted.KIND, "provider": slug, "session_id": sid, "url": url}
     if chat_url:
         if not _CHAT_URL.match(chat_url) or len(chat_url) > 500:
-            raise NoteError("chat_url must be a https://claude.ai/chat/<uuid> URL")
+            raise NoteError("chat_url must be a https://claude.ai/chat/<uuid> URL; a "
+                            f"hosted session passes {_HOSTED_FIELDS} instead")
         return {"kind": "claude-ai", "url": chat_url}
     if channel or message:
         if not (channel and message):
@@ -150,7 +170,8 @@ def make_source(*, chat_url: str | None = None, duet_channel_id: str | None = No
     if not _ID.match(session):
         raise NoteError("session_id must be a plain id")
     if not machine or not _MACHINE.match(machine) or len(machine) > MAX_FIELD:
-        raise NoteError("a Claude Code source needs the machine it ran on")
+        raise NoteError("a Claude Code source needs the machine it ran on; a "
+                        f"hosted session passes {_HOSTED_FIELDS} instead")
     if job and not JOB_ID.match(job):
         raise NoteError("job_id must look like cj_<yyyymmddThhmmssZ>_<6 hex>")
     source = {"kind": "claude-code", "machine": machine, "session_id": session}
@@ -177,6 +198,11 @@ def validate_source(source: object) -> dict:
     kind = source["kind"]
     if kind == "record":
         return record_source(source.get("client"), source.get("session"))
+    if kind == hosted.KIND:
+        fields = (source.get("provider"), source.get("session_id"), source.get("url"))
+        if not all(isinstance(field, str) for field in fields):
+            raise NoteError("a hosted source needs its provider, session id and url")
+        return make_source(provider=fields[0], session_id=fields[1], session_url=fields[2])
     if kind == "claude-ai":
         return make_source(chat_url=source.get("url"))
     if kind == "duet":
@@ -195,6 +221,8 @@ def show_target(source: dict, span: dict | None = None) -> dict | None:
         return {"session": source.get("job_id") or source["session_id"], "around": around}
     if source["kind"] == "record":
         return {"session": source["session"], "around": None}
+    if source["kind"] == hosted.KIND:
+        return {"session": source["session_id"], "around": around}
     return None  # Duet transcripts are not indexed yet
 
 
@@ -205,6 +233,8 @@ def source_line(source: dict) -> str:
         return f"Duet channel {source['channel_id']} from message {source['message_id']}"
     if source["kind"] == "record":
         return f"history_record from {source['client']} ({source['session']})"
+    if source["kind"] == hosted.KIND:
+        return f"{source['provider']} hosted session {source['session_id']} at {source['url']}"
     line = f"Claude Code session {source['session_id']} on {source['machine']}"
     return line + (f", job {source['job_id']}" if source.get("job_id") else "")
 
@@ -286,7 +316,10 @@ def redact_note(note: dict, counter: Counter | None = None) -> dict:
     for key in ("title", "summary", "decisions", "findings", "links", "author"):
         out[key] = clean(note.get(key))
     source = dict(note["source"])
-    for key in ("channel_id", "message_id", "session_id", "machine"):
+    keys = ("channel_id", "message_id", "session_id", "machine")
+    # Validation refuses a hosted id or link that looks like a secret, so this
+    # changes nothing today. It's here for a pattern added later.
+    for key in keys + (("url",) if source["kind"] == hosted.KIND else ()):
         if key in source:
             source[key] = clean(source[key])
     out["source"] = source
@@ -543,13 +576,16 @@ def _row(row, score=None) -> dict:
     (_id, note_id, created, machine, author, source, show_session, show_around,
      start, end, title, text, corrects, origin, record_session, project) = row
     text = text or ""
+    source = json.loads(source)
     extra = ({"origin": origin, "record_session": record_session, "project": project,
               "text": text} if origin == RECORD_ORIGIN else {})
+    if source.get("kind") == hosted.KIND:
+        extra["link"] = source.get("url")
     return {
         **extra,
         "type": "note", "note_id": note_id, "created_at": created,
         "machine": machine, "author": author, "title": title,
-        "source": json.loads(source),
+        "source": source,
         "span": {"start": start, "end": end},
         "show": ({"session": show_session, "around": show_around}
                  if show_session else None),
@@ -643,6 +679,25 @@ def records_for_session(session: str, *, limit: int = 50) -> list[dict]:
         return [_row(r) for r in rows][-max(1, limit):]
     finally:
         db.close()
+
+
+def hosted_link(session: str) -> dict | None:
+    """The provider and link of a hosted session, from its newest note. None
+    if no indexed note names it."""
+    if not db_path().exists():
+        return None
+    db, _ = open_store(write=False)
+    try:
+        row = db.execute("SELECT source FROM notes WHERE show_session = ? AND source_kind = ? "
+                         "ORDER BY id DESC LIMIT 1", (session, hosted.KIND)).fetchone()
+    except sqlite3.OperationalError:  # a store with no notes table yet
+        return None
+    finally:
+        db.close()
+    if not row:
+        return None
+    source = json.loads(row[0])
+    return {"provider": source.get("provider"), "link": source.get("url")}
 
 
 # ------------------------------------------------------- history_record notes

@@ -646,6 +646,8 @@ agent-history notes add --title … --summary … --session <id> [--job cj_…]
 agent-history notes sweep                              # sessions idle >= 5 min (model summary)
 agent-history notes scrub <note_id> --pattern - --reason "…"  # admin: remove a leaked secret
 agent-history notes search "what was decided"
+agent-history notes add … --provider claude-ai --session session_… --session-url https://claude.ai/code/session_…
+agent-history notes providers                          # the hosted-session providers
 history_note(...)                                      # MCP, write scope
 history_recall(query, notes="only" | "include")        # default "exclude"
 ```
@@ -654,7 +656,10 @@ The sweep's summary comes from `claude -p --model haiku` with the machine's
 own Claude login (never `ANTHROPIC_API_KEY`), on redacted text; if that call
 fails the note falls back to first prompt + last message and is marked
 `fallback`. Each note carries the `history_show` call that opens its source
-span. On a
+span. A hosted cloud session has no machine name and no transcript here, so its
+note names a registered provider, the session id and its exact link, and recall
+returns that link; see the [design note](docs/design/session-notes.md#hosted-sessions).
+On a
 hub, notes arrive in `inbox/<tenant>/<machine>/notes/` and are indexed by
 the same unit. Install: [`deploy/notes/`](deploy/notes/README.md); design:
 [`docs/design/session-notes.md`](docs/design/session-notes.md).
