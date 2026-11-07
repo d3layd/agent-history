@@ -17,22 +17,28 @@ import sqlite3
 import sys
 from collections import Counter
 
-from . import config, embed, redact, store
+from . import config, embed, store, stitch
 
 COMMIT_EVERY = 16
 
 
 def _targets(db: sqlite3.Connection) -> list[tuple[int, str, str, Counter[str]]]:
+    """Chunks whose text changes once their whole record is redacted.
+
+    Chunks are first stitched back into records (see ``stitch``), so a secret
+    cut by a chunk boundary is found whole; a chunk that cannot be stitched is
+    redacted alone.
+    """
     out = []
-    for rowid, text in db.execute("SELECT id, text FROM chunks WHERE text IS NOT NULL"):
-        found = redact.spans(text)
-        if not found:
-            continue
-        new = redact.apply(text, found)
-        # Guard: an unchanged chunk would look like its own duplicate below
-        # and be deleted.
-        if new != text:
-            out.append((rowid, text, new, Counter(cls for _, _, cls in found)))
+    rows = (stitch.Chunk(*row) for row in db.execute(
+        f"SELECT {stitch.COLUMNS} FROM chunks WHERE text IS NOT NULL ORDER BY id"))
+    for rec in stitch.stitch(rows):
+        old = {c.id: c.text for c in rec.chunks}
+        for rowid, new, counts in stitch.redact_record(rec):
+            # Guard: an unchanged chunk would look like its own duplicate below
+            # and be deleted.
+            if new != old[rowid]:
+                out.append((rowid, old[rowid], new, counts))
     return out
 
 

@@ -550,9 +550,11 @@ command in `authorized_keys`, never from the client's request.
 - **Redacted before it leaves.** `ship` ignores the local `AGENT_HISTORY_REDACT`
   setting: your local index may keep credentials on purpose, but nothing
   shipped does. The hub redacts again regardless. (Redaction is conservative
-  pattern matching, a strong reduction and not a guarantee; for `--backfill-from-index`
-  it works per stored chunk, so a secret cut by a chunk boundary can leave a
-  fragment, the same limit `scrub` has.)
+  pattern matching, a strong reduction and not a guarantee. For `--backfill-from-index`
+  and `scrub`, stored chunks are first stitched back into whole records, so a secret
+  cut by a chunk boundary is still redacted whole. A chunk that cannot be stitched
+  is redacted alone, and a long base64-like run touching its edge is replaced with
+  `[REDACTED:fragment]` as a safety net.)
 - **Two kinds of key, both pinned.** Ingest keys are `command="rrsync -wo
   <dir>",restrict`: they can only write into one directory and cannot read
   anything back. Search keys are `command="agent-history serve-ssh
