@@ -12,6 +12,16 @@ they have no corresponding tags.
 ## [Unreleased]
 
 ### Added
+- **`hosted-session` note source**, for agents in a provider's cloud with no
+  machine name. `history_note`, `history_record` and `notes add` take `provider`,
+  `session_id` and `session_url`. `provider` is an enum from the registry in
+  `hosted.py`, and this version ships only `claude-ai`. The link must exactly
+  equal the URL built from the provider's host and the session id.
+  `history_recall` returns it as `link`. `history_show` returns the link, or null,
+  with no messages. No schema change or migration.
+- **`agent-history notes providers`** lists the providers. `--check NAME --host
+  HOST` normalizes a new name to a slug and checks for duplicates before a
+  reviewed registry change. It writes nothing.
 - **`agent-history ship-jobs`**: ships `claude -p` job transcripts (Claude
   Code session files and the stream-json `transcript.jsonl`) from
   `AGENT_HISTORY_JOBS_DIR`, tagged with the job id, owning Duet channel and

@@ -79,6 +79,35 @@ Source kinds and their `history_show` link:
 | `claude-ai` | `url` = `https://claude.ai/chat/<uuid>` (or `/project/<id>/chat/<uuid>`) | the conversation uuid (resolves for imported claude.ai chats) |
 | `duet` | `channel_id`, `message_id` (the message that starts the span) | none yet: Duet transcripts are not on the hub; the note still records where to look |
 | `claude-code` | `session_id`, `machine`; `job_id` (`cj_…`) for `claude -p` | the job id when there is one (piece A files a job under its id), else the session id; `around` = span start |
+| `hosted-session` | `provider` (from the registry), `session_id`, `url`; no machine | the session id; `history_show` answers with the link, or null, because no transcript is indexed |
+
+### Hosted sessions
+
+An agent in a provider's cloud, such as a `claude.ai/code` session, has no
+machine name and no transcript on the hub. Its note names the provider, the
+session id and the link, and `history_recall` returns the link in a `link`
+field.
+
+- **`provider` is an enum.** `hosted.PROVIDERS` is the whole list. It feeds the
+  tool schema, the refusal and the tool descriptions. A note with any other
+  provider is refused, so a note can never add one.
+- **Adding a provider is a reviewed change to `hosted.py`.** Before it, run
+  `agent-history notes providers --check NAME --host HOST`. That normalizes the
+  name to a lowercase slug and checks for duplicates (`claude-ai` and `claudeai`
+  count as one), and it writes nothing. Tests hold every entry to the same rules.
+  Register only a host and URL shape seen in real sessions.
+- **The link must equal the URL built from the registered host, path prefix and
+  session id.** That's an exact string match, so there's no substring or suffix
+  to spoof, and no userinfo, port, query, fragment or http. The id always matches
+  the link. Refusals never repeat the refused value.
+- **`claude-ai`** is `https://claude.ai/code/session_<letters and digits>`, with
+  at most 120 characters after `session_`.
+- **Redaction** runs on these fields like the others, but a valid id and link
+  can't match a pattern, because an id that would is refused first. So the link
+  is never lost. The rest of the note is redacted as usual.
+
+A hub older than this kind counts such a line as malformed and moves it to
+`.processed` without indexing it. Upgrade the hub before any client sends one.
 
 On the hub, the machine a note is filed under is the inbox directory it
 arrived in, as for transcripts. The machine named inside a Claude Code
