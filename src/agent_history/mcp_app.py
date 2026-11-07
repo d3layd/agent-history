@@ -5,16 +5,30 @@ the tool schemas, so the annotations must be real objects (no
 ``from __future__ import annotations`` here), and because nothing else in the
 package should need the SDK installed.
 """
-from typing import Literal
+from typing import Annotated, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
-from . import __version__
+from . import __version__, hosted
 from .mcp_auth import Identity
 from .mcp_server import (DEFAULT_K, DEFAULT_SHOW_LIMIT, Gate, ToolFailure,
                          _dump, note, recall, record, show_session)
+
+# Built from the registry, so the schema, the refusal and the descriptions can't
+# disagree. A one-value Literal alone becomes a JSON Schema const; the explicit
+# enum keeps the same shape however many providers there are.
+ProviderName = Annotated[Literal[hosted.slugs()],
+                         Field(json_schema_extra={"enum": list(hosted.slugs())})]
+
+HOSTED_SOURCE = (
+    "In a provider-hosted cloud session, which has no machine name: provider + "
+    "session_id + session_url, no session_machine. session_url must be the "
+    f"session's exact link. provider is one of: {hosted.describe()}. Any other "
+    "provider, or a link on another host, is refused."
+)
 
 INSTRUCTIONS = (
     "Search and add to the user's history of AI conversations (Claude Code, "
@@ -55,7 +69,9 @@ def build_server(gate: Gate) -> MCPServer:
             "sort: relevance (default) or newest; notes: exclude (default, "
             "transcripts only), include (matching session notes first, then "
             "transcripts) or only (session notes alone). A note's show field "
-            "is the history_show call that opens its source span."),
+            "is the history_show call that opens its source span. A note from "
+            "a hosted cloud session also has a link field: the URL of that "
+            "session."),
         annotations=ToolAnnotations(title="Recall from history", read_only_hint=True,
                                     open_world_hint=False),
         structured_output=False,
@@ -81,7 +97,9 @@ def build_server(gate: Gate) -> MCPServer:
             "Read the conversation a history_recall hit belongs to, oldest "
             "first. session: the hit's session. around: optionally the hit's "
             "timestamp, to centre the window on it. limit: messages (default "
-            "20, max 50)."),
+            "20, max 50). For a hosted cloud session (e.g. session_...), no "
+            "transcript is indexed: the answer has link (the session's URL, or "
+            "null if no note names it yet), provider and empty messages."),
         annotations=ToolAnnotations(title="Show a past conversation", read_only_hint=True,
                                     open_world_hint=False),
         structured_output=False,
@@ -104,7 +122,7 @@ def build_server(gate: Gate) -> MCPServer:
             "project or repo it concerns. In Duet, also pass duet_channel_id and "
             "duet_message_id (the message the work started from); from Claude "
             "Code, session_id and session_machine (and job_id for a claude -p "
-            "job). Returns the record id."),
+            "job). " + HOSTED_SOURCE + " Returns the record id."),
         annotations=ToolAnnotations(title="Record to history", read_only_hint=False,
                                     destructive_hint=False, idempotent_hint=False,
                                     open_world_hint=False),
@@ -124,12 +142,15 @@ def build_server(gate: Gate) -> MCPServer:
         session_id: str | None = None,
         session_machine: str | None = None,
         job_id: str | None = None,
+        provider: ProviderName | None = None,
+        session_url: str | None = None,
     ) -> str:
         return run("history_record", ctx, record, title=title, summary=summary,
                    decisions=decisions, findings=findings, links=links,
                    chat_url=chat_url, project=project, duet_channel_id=duet_channel_id,
                    duet_message_id=duet_message_id, session_id=session_id,
-                   session_machine=session_machine, job_id=job_id)
+                   session_machine=session_machine, job_id=job_id, provider=provider,
+                   session_url=session_url)
 
     @server.tool(
         name="history_note",
@@ -144,8 +165,8 @@ def build_server(gate: Gate) -> MCPServer:
             "items. Source, exactly one of: chat_url (https://claude.ai/chat/"
             "...); duet_channel_id + duet_message_id (the message that starts "
             "the span); session_id + session_machine (+ job_id cj_... for a "
-            "claude -p job). span_start / span_end: ISO timestamps of the span. "
-            "A note without a valid source is refused."),
+            "claude -p job). " + HOSTED_SOURCE + " span_start / span_end: ISO "
+            "timestamps of the span. A note without a valid source is refused."),
         annotations=ToolAnnotations(title="Add a session note", read_only_hint=False,
                                     destructive_hint=False, idempotent_hint=False,
                                     open_world_hint=False),
@@ -167,12 +188,15 @@ def build_server(gate: Gate) -> MCPServer:
         span_start: str | None = None,
         span_end: str | None = None,
         corrects: str | None = None,
+        provider: ProviderName | None = None,
+        session_url: str | None = None,
     ) -> str:
         return run("history_note", ctx, note, title=title, summary=summary,
                    decisions=decisions, findings=findings, links=links,
                    chat_url=chat_url, duet_channel_id=duet_channel_id,
                    duet_message_id=duet_message_id, session_id=session_id,
                    session_machine=session_machine, job_id=job_id,
-                   span_start=span_start, span_end=span_end, corrects=corrects)
+                   span_start=span_start, span_end=span_end, corrects=corrects,
+                   provider=provider, session_url=session_url)
 
     return server

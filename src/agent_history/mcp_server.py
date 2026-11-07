@@ -34,7 +34,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from . import config, embed, redact, search, sessions, show, store
+from . import config, embed, hosted, redact, search, sessions, show, store
 from . import notes as notes_store
 from .mcp_auth import Identity, RateLimiter, TokenStore, bearer
 
@@ -271,6 +271,7 @@ def show_session(identity: Identity | None, session: str, *,
 
     with _tenant_index(identity.tenant):
         rows: list[dict] = []
+        link = notes_store.hosted_link(session)
         if config.db_path().exists():
             try:
                 rows = show.rows_for(session, around=around, limit=limit)
@@ -294,11 +295,20 @@ def show_session(identity: Identity | None, session: str, *,
                                      for r in records]}
         claude = _claude_ids({rows[0].get("session_uid") or ""}) if rows else {}
     if not rows:
-        raise ToolFailure(f"nothing indexed for session {session!r}")
+        provider = link["provider"] if link else hosted.provider_for_id(session)
+        if provider is None:
+            raise ToolFailure(f"nothing indexed for session {session!r}")
+        # A hosted session has no transcript here: the link is the way back,
+        # and it's null until a note with this id has been indexed.
+        return {"session": session, "session_id": session, "agent": "", "machine": "",
+                "project": "", "provider": provider, "link": link["link"] if link else None,
+                "messages": []}
 
     first = rows[0]
     extra = ({"claude_session_ids": claude[first["session_uid"]]}
              if first.get("session_uid") in claude else {})
+    if link:
+        extra.update(link)
     return {
         **extra,
         "session": _session_of(first) or session,
@@ -400,11 +410,13 @@ def record(identity: Identity | None, *, title: str, summary: str,
            links: list[str] | None = None, chat_url: str | None = None,
            project: str | None = None, duet_channel_id: str | None = None,
            duet_message_id: str | None = None, session_id: str | None = None,
-           session_machine: str | None = None, job_id: str | None = None) -> dict:
+           session_machine: str | None = None, job_id: str | None = None,
+           provider: str | None = None, session_url: str | None = None) -> dict:
     """Save a chat record. Same name, arguments and answer as before, but the
     record is a note now (piece D): it goes to the notes inbox, never the
-    transcript index. The optional Duet / Claude Code ids give it a real
-    source link; without one its source is the record's own chat session."""
+    transcript index. The optional Duet / Claude Code / hosted-session ids give
+    it a real source link; without one its source is the record's own chat
+    session."""
     identity = _require(identity, "write")
     title = (title or "").strip()
     summary = (summary or "").strip()
@@ -430,7 +442,10 @@ def record(identity: Identity | None, *, title: str, summary: str,
     source = _record_source(identity, legacy_session, chat_url=chat_url,
                             duet_channel_id=duet_channel_id,
                             duet_message_id=duet_message_id, session_id=session_id,
-                            session_machine=session_machine, job_id=job_id)
+                            session_machine=session_machine, job_id=job_id,
+                            provider=provider, session_url=session_url)
+    # A record's text keeps its link, since the default recall shows only that.
+    chat_link = source["url"] if source["kind"] == hosted.KIND else chat_url
     counter: Counter = Counter()
     try:
         written = notes_store.build(
@@ -439,7 +454,7 @@ def record(identity: Identity | None, *, title: str, summary: str,
             note_id=notes_store.record_note_id(record_id), counter=counter,
             record={"record_id": record_id, "session": legacy_session, "project": project,
                     "text": record_text(title, summary, decisions, findings, links,
-                                        chat_url, project, record_id)})
+                                        chat_link, project, record_id)})
     except notes_store.NoteError as exc:
         raise ToolFailure(str(exc)) from None
     directory = _inbox_dir(identity) / notes_store.NOTES_DIR
@@ -451,7 +466,7 @@ def record(identity: Identity | None, *, title: str, summary: str,
         raise ToolFailure(str(exc)) from None
     # Counted as before: what was redacted in the record's text and project.
     _, found = redact.redact(record_text(title, summary, decisions, findings, links,
-                                         chat_url, project, record_id))
+                                         chat_link, project, record_id))
     found.update(redact.redact(project or "")[1])
     return {
         "record_id": record_id,
@@ -465,13 +480,19 @@ def record(identity: Identity | None, *, title: str, summary: str,
 
 
 def _record_source(identity: Identity, legacy_session: str, *, chat_url, duet_channel_id,
-                   duet_message_id, session_id, session_machine, job_id) -> dict:
+                   duet_message_id, session_id, session_machine, job_id, provider,
+                   session_url) -> dict:
     """The best source a history_record call gave: a claude.ai URL, the Duet
-    channel + message ids, a Claude Code session, else the record's own chat
-    session (which history_show serves from the notes store)."""
+    channel + message ids, a Claude Code or hosted session, else the record's
+    own chat session (which history_show serves from the notes store). A hosted
+    source is never passed over for another, so a bad one is always refused."""
+    if (provider or session_url) and (chat_url or duet_channel_id or duet_message_id):
+        raise ToolFailure("give exactly one source: a hosted session's provider, session_id "
+                          "and session_url don't go with a chat_url or Duet ids")
     for kwargs in ({"chat_url": chat_url},
                    {"duet_channel_id": duet_channel_id, "duet_message_id": duet_message_id},
-                   {"session_id": session_id, "machine": session_machine, "job_id": job_id}):
+                   {"session_id": session_id, "machine": session_machine, "job_id": job_id,
+                    "provider": provider, "session_url": session_url}):
         if not any(kwargs.values()):
             continue
         try:
@@ -488,7 +509,8 @@ def note(identity: Identity | None, *, title: str, summary: str,
          duet_channel_id: str | None = None, duet_message_id: str | None = None,
          session_id: str | None = None, session_machine: str | None = None,
          job_id: str | None = None, span_start: str | None = None,
-         span_end: str | None = None, corrects: str | None = None) -> dict:
+         span_end: str | None = None, corrects: str | None = None,
+         provider: str | None = None, session_url: str | None = None) -> dict:
     """Append a session note. It goes to the tenant's notes inbox (never the
     transcript inbox) and is indexed into notes.db, apart from transcripts."""
     identity = _require(identity, "write")
@@ -497,7 +519,8 @@ def note(identity: Identity | None, *, title: str, summary: str,
         source = notes_store.make_source(
             chat_url=chat_url, duet_channel_id=duet_channel_id,
             duet_message_id=duet_message_id, session_id=session_id,
-            machine=session_machine, job_id=job_id)
+            machine=session_machine, job_id=job_id, provider=provider,
+            session_url=session_url)
         written = notes_store.build(
             title=title, summary=summary, source=source, decisions=decisions,
             findings=findings, links=links, span_start=span_start,
@@ -512,7 +535,9 @@ def note(identity: Identity | None, *, title: str, summary: str,
         notes_store.write_file(directory, written)
     except notes_store.NoteError as exc:
         raise ToolFailure(str(exc)) from None
+    extra = {"link": written["source"]["url"]} if source["kind"] == hosted.KIND else {}
     return {
+        **extra,
         "note_id": written["note_id"],
         "created_at": written["created_at"],
         "source": written["source"],
